@@ -1,5 +1,6 @@
 # ASO Keyword Toolkit — free App Store keyword research from the command line
 
+[![PyPI](https://img.shields.io/pypi/v/aso-keyword-toolkit.svg)](https://pypi.org/project/aso-keyword-toolkit/)
 [![tests](https://github.com/ggapp1/aso-keyword-toolkit/actions/workflows/tests.yml/badge.svg)](https://github.com/ggapp1/aso-keyword-toolkit/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
@@ -14,7 +15,7 @@ where it's invisible. Then write, validate, and publish localized metadata
 without touching the App Store Connect web UI.
 
 ```bash
-pip install git+https://github.com/ggapp1/aso-keyword-toolkit
+pip install aso-keyword-toolkit
 asokit init --app-id 1234567890 --markets de,fr,jp
 asokit research --all
 ```
@@ -40,17 +41,15 @@ in [What the numbers mean](#what-the-numbers-mean).
 
 ## Installation
 
-Not on PyPI yet — install straight from GitHub:
-
 ```bash
-pip install git+https://github.com/ggapp1/aso-keyword-toolkit
+pip install aso-keyword-toolkit
 ```
 
 **pipx or uv** — if you want it as an isolated global tool:
 
 ```bash
-pipx install git+https://github.com/ggapp1/aso-keyword-toolkit
-uv tool install git+https://github.com/ggapp1/aso-keyword-toolkit
+pipx install aso-keyword-toolkit
+uv tool install aso-keyword-toolkit
 ```
 
 **For development**, or if you want to read the code first:
@@ -64,7 +63,7 @@ cd aso-keyword-toolkit && pip install -e .
 research does not:
 
 ```bash
-pip install "aso-keyword-toolkit[connect] @ git+https://github.com/ggapp1/aso-keyword-toolkit"
+pip install "aso-keyword-toolkit[connect]"
 ```
 
 ### Claude Code plugin
@@ -418,10 +417,6 @@ good pre-submission gate.
 **What Python version do I need?**
 3.9 or newer, tested on 3.9, 3.11 and 3.13. Research has no dependencies at
 all; only App Store Connect sync adds `pyjwt` and `cryptography`.
-
-**Why isn't it on PyPI?**
-It will be. Until then `pip install git+https://github.com/ggapp1/aso-keyword-toolkit`
-installs the same package and gives you the `asokit` command.
 
 ---
 
