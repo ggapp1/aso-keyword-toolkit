@@ -18,8 +18,18 @@ asokit init --app-id <id> --markets de,fr
 asokit doctor          # config, connectivity, credentials
 ```
 
+To add a market to a config that already exists, use `--add` — it keeps the
+existing markets and their curated seeds:
+
+```bash
+asokit init --add --markets it,pl
+```
+
 Review the suggested seeds with the user before running research — they are
 derived from English-language listings and need native terms added per market.
+
+Make sure `app.appId` is set. Without it there is no rank column, and the
+off-category filter below is silently disabled.
 
 **Scope: App Store metadata only.** Not in-app strings, not screenshots.
 Before shipping ASO for a market whose app UI isn't localized, weigh that
@@ -49,16 +59,19 @@ Runs each seed through that storefront's autocomplete, then scores every
 candidate against the top-50 ranked apps. Writes `report.md`, `scores.json`,
 `expansion.json`. Responses cache, so re-runs are free.
 
-Read the report for three things:
+Read the report for four things:
 
 1. **Where the app already ranks** (`our rank`). Existing strength is an asset
    to protect, not to overwrite.
 2. **Where it's invisible** on terms with low `comp`. That's the opening.
 3. **The competitor table.** A rival's title is their keyword bet.
+4. **The off-category section.** Terms answered by apps in another App Store
+   category are separated out automatically. Do not resurrect them because the
+   numbers look good — they belong to a different audience.
 
-Then apply judgment the scores can't: is the top result for this term even in
-our category? A keyword can score well and serve a different audience
-entirely.
+Then apply the judgment the scores still can't. Off-category catches a
+different *category*; it cannot catch a term that is in our category but
+serves a different intent. Check who actually ranks before committing a slot.
 
 ## Phase 4 — Compose (review gate)
 
@@ -67,6 +80,9 @@ order:
 
 1. **Never repeat a term across name, subtitle, and keywords.** Apple indexes
    all three as one pool; duplicates waste a 100-character budget.
+   This includes **shared stems** — a title saying "Tracker" already covers a
+   subtitle saying "Track". `metadata check` flags both cases; run it rather
+   than eyeballing.
 2. Limits: name 30, subtitle 30, keywords 100, promotional text 170.
 3. Keyword field: comma-separated, no spaces after commas, singular forms.
 4. Prefer distinct single words in the keyword field over repeating a phrase
