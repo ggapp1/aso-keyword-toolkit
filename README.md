@@ -1,5 +1,6 @@
 # ASO Keyword Toolkit — free App Store keyword research from the command line
 
+[![tests](https://github.com/ggapp1/aso-keyword-toolkit/actions/workflows/tests.yml/badge.svg)](https://github.com/ggapp1/aso-keyword-toolkit/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
 [![Zero dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](pyproject.toml)
