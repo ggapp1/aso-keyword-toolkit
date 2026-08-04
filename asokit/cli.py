@@ -53,10 +53,18 @@ def market_config(config, market):
 
 def cmd_init(args):
     path = Path(args.config)
-    if path.exists() and not args.force:
-        sys.exit(f"{path} already exists. Pass --force to overwrite.")
+    existing = None
+    if path.exists():
+        if args.add:
+            existing = json.loads(path.read_text())
+        elif not args.force:
+            sys.exit(
+                f"{path} already exists.\n"
+                "  --add    keep it and add the requested markets\n"
+                "  --force  overwrite it"
+            )
 
-    if not args.app_id:
+    if not args.app_id and not existing:
         path.write_text(json.dumps(STARTER_CONFIG, indent=2) + "\n")
         print(f"wrote {path}")
         print("\nAdd your appId and seeds, then run: asokit research --market de")
@@ -65,44 +73,55 @@ def cmd_init(args):
         print("App Store URL, e.g. apps.apple.com/app/id1234567890")
         return
 
-    home = args.home
-    print(f"reading your listing in the {home.upper()} store...")
-    app = sources.lookup(args.app_id, home)
-    if not app:
-        sys.exit(
-            f"app {args.app_id} not found in the {home} store.\n"
-            "Check the ID, or pass --home with the country where it's published."
-        )
-    print(f"  {app.get('trackName')} — {app.get('primaryGenreName')}")
-
-    print("looking at apps that rank alongside it (this takes a moment)...")
-    seeds, context = suggest.from_app(args.app_id, home)
-    print(f"  read {context['competitorsRead']} competitor listings")
-
     markets = [m.strip().lower() for m in args.markets.split(",") if m.strip()]
     unknown = [m for m in markets if m not in storefronts.STOREFRONTS]
     if unknown:
         sys.exit(f"unknown market(s): {', '.join(unknown)}. See `asokit storefronts`.")
 
-    config = {
-        "app": {
-            "name": app.get("trackName"),
-            "appId": int(args.app_id),
-            "outputDir": "aso",
-        },
-        "markets": {
-            market: {
-                "country": market,
-                "notes": f"Seeds derived from your {home.upper()} listing. "
-                "Add native-language terms for this market before your real run.",
-                "seeds": seeds,
-            }
-            for market in markets
-        },
+    app_id = args.app_id or (existing or {}).get("app", {}).get("appId")
+    if not app_id:
+        sys.exit("need --app-id (or an existing config with app.appId) to derive seeds")
+
+    home = args.home
+    print(f"reading your listing in the {home.upper()} store...")
+    app = sources.lookup(app_id, home)
+    if not app:
+        sys.exit(
+            f"app {app_id} not found in the {home} store.\n"
+            "Check the ID, or pass --home with the country where it's published."
+        )
+    print(f"  {app.get('trackName')} — {app.get('primaryGenreName')}")
+
+    print("looking at apps that rank alongside it (this takes a moment)...")
+    seeds, context = suggest.from_app(app_id, home)
+    print(f"  read {context['competitorsRead']} competitor listings")
+
+    config = existing or {
+        "app": {"name": app.get("trackName"), "appId": int(app_id), "outputDir": "aso"},
+        "markets": {},
     }
+    config.setdefault("markets", {})
+    config["app"].setdefault("genre", app.get("primaryGenreName"))
+
+    added, skipped = [], []
+    for market in markets:
+        if market in config["markets"] and existing:
+            skipped.append(market)
+            continue
+        config["markets"][market] = {
+            "country": market,
+            "notes": f"Seeds derived from the {home.upper()} listing. "
+            "Add native-language terms for this market before your real run.",
+            "seeds": seeds,
+        }
+        added.append(market)
+
     path.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n")
 
-    print(f"\nwrote {path} with {len(seeds)} seeds and {len(markets)} market(s)")
+    if added:
+        print(f"\nwrote {path} — added {', '.join(added)} with {len(seeds)} seeds")
+    if skipped:
+        print(f"kept existing config for: {', '.join(skipped)} (already present)")
     print("\nSuggested seeds:")
     for seed in seeds:
         print(f"  {seed}")
@@ -110,7 +129,8 @@ def cmd_init(args):
         "\nThese come from English-language listings. For non-English markets,\n"
         "add native terms too — that is where the openings usually are.\n"
     )
-    print(f"Next: asokit research --market {markets[0]}")
+    if added:
+        print(f"Next: asokit research --market {added[0]}")
 
 
 def cmd_doctor(args):
@@ -196,6 +216,11 @@ def run_market(config, market_name, args):
     output.mkdir(parents=True, exist_ok=True)
     cache = None if args.no_cache else sources.Cache(output / ".cache.json")
 
+    our_genre = app.get("genre")
+    if app_id and not our_genre:
+        listing = sources.lookup(app_id, country, cache)
+        our_genre = listing.get("primaryGenreName") if listing else None
+
     seeds = market["seeds"]
     seeds_lower = {seed.lower() for seed in seeds}
     print(f"\n{storefronts.name(country)} — expanding {len(seeds)} seeds")
@@ -216,7 +241,9 @@ def run_market(config, market_name, args):
     for index, term in enumerate(candidates, start=1):
         print(f"  [{index}/{len(candidates)}] {term}")
         scores.append(
-            research.score(term, evidence[term], country, app_id, cache, seeds_lower)
+            research.score(
+                term, evidence[term], country, app_id, cache, seeds_lower, our_genre
+            )
         )
 
     (output / "scores.json").write_text(json.dumps(scores, indent=2, ensure_ascii=False))
@@ -229,7 +256,9 @@ def run_market(config, market_name, args):
 
 def summarize(scores, app_id):
     """The three things worth reading first, so the table isn't a wall."""
-    targetable = [s for s in scores if not s["looksLikeAppName"]]
+    targetable = [
+        s for s in scores if not s["looksLikeAppName"] and not s.get("offCategory")
+    ]
     openings = sorted(
         (s for s in targetable if s["competitionTier"] <= 2 and s["popularity"] > 0),
         key=lambda s: -s["opportunity"],
@@ -367,7 +396,10 @@ def build_parser():
     initialize.add_argument(
         "--home", default="us", help="store to read your listing from (default: us)"
     )
-    initialize.add_argument("--force", action="store_true")
+    initialize.add_argument(
+        "--add", action="store_true", help="add markets to an existing config"
+    )
+    initialize.add_argument("--force", action="store_true", help="overwrite an existing config")
     initialize.set_defaults(func=cmd_init)
 
     doctor = subcommands.add_parser("doctor", help="check config, connectivity, credentials")

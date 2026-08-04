@@ -81,5 +81,39 @@ class Usage(unittest.TestCase):
         self.assertEqual(usage["en-US"]["name"], (9, 30))
 
 
+
+
+class Stemming(unittest.TestCase):
+    """Apple matches on stems, so 'track' in a title already covers 'tracker'."""
+
+    def test_strips_agent_noun_and_plural(self):
+        self.assertEqual(metadata.stem("tracker"), "track")
+        self.assertEqual(metadata.stem("trackers"), "track")
+        self.assertEqual(metadata.stem("moods"), "mood")
+        self.assertEqual(metadata.stem("users"), "user")
+
+    def test_leaves_short_and_unsuffixed_words_alone(self):
+        for word in ("track", "mood", "meds", "bpd", "anxiety", "episode"):
+            self.assertEqual(metadata.stem(word), word)
+
+    def test_keyword_sharing_stem_with_title_is_flagged(self):
+        problems = metadata.check(
+            {"en-US": {"name": "Budget Tracker", "keywords": "track,receipts"}}
+        )
+        self.assertTrue(any("shares a stem with 'tracker'" in p for p in problems))
+
+    def test_title_and_subtitle_stem_collision_is_flagged(self):
+        """The real-world case: title says 'Tracker', subtitle says 'Track'."""
+        problems = metadata.check(
+            {"en-US": {"name": "Budget Tracker: Ledger", "subtitle": "Track spending daily"}}
+        )
+        self.assertTrue(any("share a stem" in p for p in problems))
+
+    def test_distinct_words_are_not_falsely_flagged(self):
+        problems = metadata.check(
+            {"en-US": {"name": "Budget Ledger", "subtitle": "Save more", "keywords": "receipts"}}
+        )
+        self.assertEqual(problems, [])
+
 if __name__ == "__main__":
     unittest.main()

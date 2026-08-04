@@ -200,6 +200,27 @@ quietly corrupts keyword research. Those are detected and listed separately
 rather than scored as opportunities — including in Japanese and Chinese
 listings, which join name and tagline with `・` and `：` instead of `:`.
 
+### Off-category detection
+
+Some terms score beautifully and belong to somebody else entirely. Searching
+`moodle` in the US store looks like a strong lead for a mood app; it returns
+Education software. `tracker detect` returns AirTag finders. `self-help credit
+union` returns a bank.
+
+When your config has an `appId`, the toolkit reads your App Store category and
+compares it against the apps actually ranking for each term. Anything answered
+by a different category is moved to its own section:
+
+```
+| term                   | pop | comp | who actually ranks |
+|------------------------|-----|------|--------------------|
+| moodle                 |  10 |    1 | Education          |
+| self-help credit union |   9 |    5 | Finance            |
+```
+
+Real output — both scored well enough to top the list for a health app, and
+neither is worth a character.
+
 ---
 
 ## 60 storefronts, every language
@@ -254,6 +275,7 @@ It catches what actually goes wrong:
 
 - fields over the 30 / 30 / 100 character limits
 - a keyword that already appears in your name or subtitle
+- a keyword that *shares a stem* with one — `track` versus `tracker`
 - a word duplicated between name and subtitle
 - the same keyword listed twice
 - `a, b, c` spacing in the keyword field, which silently costs you characters
@@ -265,6 +287,9 @@ you'd rather paste into the web UI.
 
 - Limits: **name 30, subtitle 30, keywords 100**, promotional text 170.
 - Never repeat a term across those three fields.
+- **Watch stems, not just words.** Apple matches `Track` and `Tracker` as the
+  same term, so a title saying "Tracker" makes a subtitle saying "Track" dead
+  weight. `metadata check` catches these; exact-string comparison does not.
 - No spaces after commas in the keyword field.
 - Use singular forms — Apple handles plurals.
 - Apple combines words across fields, so prefer distinct single words in the
@@ -366,6 +391,7 @@ serves a different audience. That's what the competitor table is for — read it
 | command | what it does |
 |---------|--------------|
 | `asokit init --app-id ID` | write a config with seeds derived from your live listing |
+| `asokit init --add --markets fr` | add markets to an existing config, keeping your seeds |
 | `asokit doctor` | check config, Apple connectivity, and credentials |
 | `asokit storefronts` | list all 60 storefronts |
 | `asokit storefronts --check de` | verify one storefront against the live endpoint |

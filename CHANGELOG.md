@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.0
+
+- **Off-category detection.** Terms answered by apps in a different App Store
+  category are now separated out of the targetable list. In the US store this
+  correctly demotes `moodle` (Education), `tracker detect` (Utilities) and
+  `self-help credit union` (Finance) from a mood-tracking app's results —
+  keywords that scored well but belong to another audience entirely. Requires
+  `app.appId` so the category can be read.
+- **Stem-aware metadata validation.** Apple matches on stems, so `Track` in a
+  subtitle already covers `Tracker` in the title. `metadata check` now flags
+  these collisions, which exact-string comparison silently allowed.
+- **`asokit init --add`** adds markets to an existing config instead of
+  refusing to run or overwriting curated seeds.
+- Report gains an "Off-category" section; run summaries exclude those terms.
+
 ## 0.1.0
 
 First release.

@@ -24,6 +24,23 @@ KNOWN_FIELDS = APP_INFO_FIELDS | VERSION_FIELDS
 
 _WORD_SEPARATORS = ":,-–—/&|"
 
+# Apple matches on stems, so `track` in a subtitle already covers `tracker` in
+# the keyword field. Comparing exact strings misses the most common form of
+# wasted budget. This is deliberately conservative — plurals and agent nouns
+# only — because over-stemming would flag genuinely distinct words.
+_SUFFIXES = ("ers", "er", "s")
+
+
+def stem(word):
+    for suffix in _SUFFIXES:
+        if word.endswith(suffix) and len(word) - len(suffix) >= 4:
+            return word[: -len(suffix)]
+    return word
+
+
+def _stems(words):
+    return {stem(word) for word in words}
+
 
 def _words(text):
     if not isinstance(text, str):
@@ -70,6 +87,7 @@ def check(metadata):
         title_words = _words(fields.get("name", ""))
         subtitle_words = _words(fields.get("subtitle", ""))
         indexed_elsewhere = title_words | subtitle_words
+        stems_elsewhere = _stems(indexed_elsewhere)
 
         for term in keyword_terms(keywords):
             if term in indexed_elsewhere:
@@ -77,8 +95,22 @@ def check(metadata):
                     f"{locale}: keyword '{term}' already appears in the name or subtitle — "
                     "Apple indexes all three fields together, so this is wasted budget"
                 )
+            elif stem(term) in stems_elsewhere:
+                twin = next(w for w in sorted(indexed_elsewhere) if stem(w) == stem(term))
+                problems.append(
+                    f"{locale}: keyword '{term}' shares a stem with '{twin}' in the name or "
+                    "subtitle — Apple matches on stems, so this adds no new coverage"
+                )
+
         for word in sorted(title_words & subtitle_words):
             problems.append(f"{locale}: '{word}' appears in both name and subtitle")
+        for word in sorted(title_words):
+            for other in sorted(subtitle_words):
+                if word != other and stem(word) == stem(other):
+                    problems.append(
+                        f"{locale}: '{word}' (name) and '{other}' (subtitle) share a stem — "
+                        "Apple matches on stems, so the second one buys nothing"
+                    )
 
         duplicate_keywords = _duplicates(keyword_terms(keywords))
         for term in duplicate_keywords:

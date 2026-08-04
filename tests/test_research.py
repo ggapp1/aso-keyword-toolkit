@@ -140,5 +140,31 @@ class Expansion(unittest.TestCase):
         self.assertIn("expenses", evidence)  # seeds always present, even if unsuggested
 
 
+
+
+class OffCategory(unittest.TestCase):
+    """Some terms score well but belong to a different App Store category."""
+
+    def genre_app(self, name, genre):
+        return {"trackName": name, "userRatingCount": 10, "trackId": 1, "primaryGenreName": genre}
+
+    def test_flags_term_answered_by_another_category(self):
+        top = [self.genre_app("Moodle", "Education")] * 3
+        self.assertTrue(research.is_off_category(top, "Health & Fitness"))
+
+    def test_keeps_term_when_our_category_is_present(self):
+        top = [
+            self.genre_app("Moodle", "Education"),
+            self.genre_app("Budget Tracker", "Finance"),
+        ]
+        self.assertFalse(research.is_off_category(top, "Finance"))
+
+    def test_no_genre_configured_disables_the_check(self):
+        top = [self.genre_app("Moodle", "Education")]
+        self.assertFalse(research.is_off_category(top, None))
+
+    def test_missing_genre_data_does_not_flag(self):
+        self.assertFalse(research.is_off_category([{"trackName": "x"}], "Finance"))
+
 if __name__ == "__main__":
     unittest.main()

@@ -33,8 +33,17 @@ def render(country_name, country_code, app_label, scores):
         TABLE_HEADER,
     ]
 
-    generic = [score for score in scores if not score["looksLikeAppName"]]
+    generic = [
+        score
+        for score in scores
+        if not score["looksLikeAppName"] and not score.get("offCategory")
+    ]
     brand = [score for score in scores if score["looksLikeAppName"]]
+    off_category = [
+        score
+        for score in scores
+        if score.get("offCategory") and not score["looksLikeAppName"]
+    ]
 
     for index, score in enumerate(sorted(generic, key=lambda s: -s["opportunity"]), start=1):
         lines.append(
@@ -44,6 +53,23 @@ def render(country_name, country_code, app_label, scores):
             f"| {score['exactTitleMatches']} | {score['ourRank'] or '—'} "
             f"| {score['opportunity']} |"
         )
+
+    if off_category:
+        lines += [
+            "",
+            "## Off-category (excluded — different audience)",
+            "",
+            "Scored well, but the apps answering these queries are in another App Store",
+            "category. Ranking here buys traffic that will not convert.",
+            "",
+            "| term | pop | comp | who actually ranks |",
+            "|------|-----|------|--------------------|",
+        ]
+        for score in sorted(off_category, key=lambda s: -s["opportunity"]):
+            genres = ", ".join(score.get("topGenres") or []) or "—"
+            lines.append(
+                f"| {score['term']} | {score['popularity']} | {score['competitionTier']} | {genres} |"
+            )
 
     if brand:
         lines += [

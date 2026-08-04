@@ -87,7 +87,34 @@ def is_app_name(term, top_apps, exact_title_matches, seeds_lower):
     return False
 
 
-def score(term, evidence, country, app_id=None, cache=None, seeds_lower=frozenset()):
+def is_off_category(top_apps, our_genre):
+    """True when the apps answering this query are in a different category.
+
+    Catches the false positives no keyword score can: in the US store `moodle`
+    looks like a strong mood keyword but returns Education apps, `self-help
+    credit union` returns Finance, and `manic emu` returns Games. If none of
+    the top-ranked apps share our category, the query belongs to a different
+    audience however good its numbers look.
+
+    Needs `our_genre`, so it only applies when an appId is configured.
+    """
+    if not our_genre:
+        return False
+    genres = [app.get("primaryGenreName") for app in top_apps[:5] if app.get("primaryGenreName")]
+    if not genres:
+        return False
+    return our_genre not in genres
+
+
+def score(
+    term,
+    evidence,
+    country,
+    app_id=None,
+    cache=None,
+    seeds_lower=frozenset(),
+    our_genre=None,
+):
     """Reduce one candidate to its signals. `evidence` is expand()'s value."""
     results = sources.search(term, country, cache)
     top_ten = results[:10]
@@ -111,6 +138,10 @@ def score(term, evidence, country, app_id=None, cache=None, seeds_lower=frozense
     return {
         "term": term,
         "looksLikeAppName": is_app_name(term, top_ten, exact_title_matches, seeds_lower),
+        "offCategory": is_off_category(top_ten, our_genre),
+        "topGenres": sorted(
+            {app.get("primaryGenreName") for app in top_ten[:5] if app.get("primaryGenreName")}
+        ),
         "popularity": popularity,
         "autocompleteBestRank": best_rank,
         "seedBreadth": seed_breadth,
