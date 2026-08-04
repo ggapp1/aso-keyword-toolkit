@@ -1,0 +1,19 @@
+# Cached Apple API responses — regenerable, and large
+.cache.json
+**/.cache.json
+
+# Research output (keep your own if you want; ignored by default)
+aso/
+
+# Never commit App Store Connect keys
+*.p8
+AuthKey_*
+
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+.DS_Store

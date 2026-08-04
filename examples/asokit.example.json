@@ -1,0 +1,42 @@
+{
+  "app": {
+    "name": "Example Budget Tracker",
+    "appId": 1234567890,
+    "outputDir": "aso"
+  },
+  "markets": {
+    "de": {
+      "country": "de",
+      "notes": "Include English seeds — many German users search in English. Compound nouns like 'haushaltsbuch' must appear whole; Apple can't assemble them from parts across fields.",
+      "seeds": [
+        "budget app",
+        "expense tracker",
+        "money manager",
+        "savings",
+        "haushaltsbuch",
+        "ausgaben",
+        "budgetplaner",
+        "finanzen",
+        "geld sparen"
+      ]
+    },
+    "es": {
+      "country": "es",
+      "notes": "Accents matter — autocomplete treats 'ahorro' and 'ahorró' as different queries.",
+      "seeds": [
+        "expense tracker",
+        "budget app",
+        "gastos",
+        "control de gastos",
+        "presupuesto",
+        "ahorro",
+        "finanzas personales"
+      ]
+    },
+    "jp": {
+      "country": "jp",
+      "notes": "Japanese listings join name and tagline with '・', which the toolkit treats as an app-name signal.",
+      "seeds": ["budget app", "家計簿", "家計簿 無料", "節約", "支出管理"]
+    }
+  }
+}

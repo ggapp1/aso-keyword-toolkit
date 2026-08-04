@@ -1,0 +1,27 @@
+{
+  "name": "aso-toolkit",
+  "owner": {
+    "name": "Gustavo Germano",
+    "url": "https://github.com/ggapp1"
+  },
+  "description": "App Store Optimization tooling: per-storefront keyword research and metadata workflows.",
+  "plugins": [
+    {
+      "name": "aso-keyword-toolkit",
+      "displayName": "ASO Keyword Toolkit",
+      "source": "./",
+      "description": "App Store keyword research and ASO metadata workflows using Apple's free per-storefront data, with App Store Connect sync.",
+      "homepage": "https://github.com/ggapp1/aso-keyword-toolkit",
+      "repository": "https://github.com/ggapp1/aso-keyword-toolkit",
+      "license": "MIT",
+      "keywords": [
+        "aso",
+        "app-store-optimization",
+        "keyword-research",
+        "app-store-connect",
+        "ios",
+        "localization"
+      ]
+    }
+  ]
+}

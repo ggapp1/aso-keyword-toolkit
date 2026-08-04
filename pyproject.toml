@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aso-keyword-toolkit"
+version = "0.1.0"
+description = "Free App Store keyword research and ASO metadata toolkit — per-storefront autocomplete data, competitor analysis, and App Store Connect sync. No subscription."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Gustavo Germano" }]
+keywords = [
+    "aso",
+    "app-store-optimization",
+    "keyword-research",
+    "app-store",
+    "app-store-connect",
+    "ios",
+    "aso-tools",
+    "mobile-marketing",
+    "itunes-search-api",
+    "app-store-keywords",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+    "Topic :: Office/Business :: Financial :: Point-Of-Sale",
+]
+dependencies = []
+
+[project.optional-dependencies]
+# Only needed for `asokit metadata push` / `status`. Research needs nothing.
+connect = ["pyjwt>=2.0", "cryptography>=3.4"]
+
+[project.urls]
+Homepage = "https://github.com/ggapp1/aso-keyword-toolkit"
+Issues = "https://github.com/ggapp1/aso-keyword-toolkit/issues"
+
+[project.scripts]
+asokit = "asokit.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["asokit*"]
