@@ -6,6 +6,9 @@
   asokit metadata check <file>         validate limits and duplication
   asokit metadata status               what App Store Connect will accept
   asokit metadata push <file> [--apply]  sync (dry run unless --apply)
+  asokit products status               list IAPs/subscriptions and their locales
+  asokit products check <file>         validate product text limits
+  asokit products push <file> [--apply]  sync product text (dry run unless --apply)
 """
 
 import argparse
@@ -14,7 +17,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import asc, metadata as meta, report, research, sources, storefronts, suggest
+from . import asc, metadata as meta, products as prod, report, research, sources, storefronts, suggest
 
 DEFAULT_CONFIG = "asokit.json"
 
@@ -376,6 +379,74 @@ def cmd_metadata_push(args):
         print("\nDRY RUN — nothing written. Re-run with --apply to push.")
 
 
+def cmd_products_check(args):
+    data = json.loads(Path(args.file).read_text())
+    problems = prod.check(data)
+    for product_id, locales in sorted(data.items()):
+        print(f"\n{'=' * 58}\n{product_id}\n{'=' * 58}")
+        for locale, fields in sorted(locales.items()):
+            for field, value in fields.items():
+                limit = prod.LIMITS.get(field)
+                gauge = f"{len(value)}/{limit}" if isinstance(value, str) and limit else "?"
+                print(f"  {locale:<8} {field:<14} ({gauge})  {value}")
+    if problems:
+        print(f"\n{'!' * 58}\n{len(problems)} problem(s)\n{'!' * 58}")
+        for problem in problems:
+            print(f"  - {problem}")
+        sys.exit(1)
+    print("\nAll fields within limits.")
+
+
+def cmd_products_status(args):
+    config = load_config(args.config) if Path(args.config).exists() else {}
+    app_id = _app_id(args, config)
+    if not app_id:
+        sys.exit("need an appId — pass --app-id or set app.appId in the config")
+    inventory = asc.products_status(app_id, asc.token())
+    for group in inventory["subscriptionGroups"]:
+        print(f"subscription group '{group['referenceName']}' (key: group:{group['referenceName']})")
+        print(f"  locales: {', '.join(sorted(group['localizations'])) or '(none)'}")
+        for subscription in group["subscriptions"]:
+            print(f"  {subscription['productId']} — {subscription['state']}")
+            for locale, item in sorted(subscription["localizations"].items()):
+                print(f"    {locale:<8} {item['name']!r} / {item['description']!r} [{item['state']}]")
+    for iap in inventory["inAppPurchases"]:
+        print(f"in-app purchase {iap['productId']} — {iap['state']}")
+        for locale, item in sorted(iap["localizations"].items()):
+            print(f"    {locale:<8} {item['name']!r} / {item['description']!r} [{item['state']}]")
+    if args.json:
+        print(json.dumps(inventory, indent=2, ensure_ascii=False))
+
+
+def cmd_products_push(args):
+    config = load_config(args.config) if Path(args.config).exists() else {}
+    app_id = _app_id(args, config)
+    if not app_id:
+        sys.exit("need an appId — pass --app-id or set app.appId in the config")
+
+    data = json.loads(Path(args.file).read_text())
+    problems = prod.check(data)
+    if problems:
+        print("validation failed — nothing sent:")
+        for problem in problems:
+            print(f"  - {problem}")
+        sys.exit(1)
+
+    actions = asc.push_products(app_id, data, asc.token(), apply=args.apply)
+    for action in actions:
+        print(
+            f"  {action['product']:<32} {action['locale']:<8} "
+            f"{action['operation']:<18} {', '.join(action['fields'])}"
+        )
+    if args.apply:
+        print(
+            "\napplied — verify in App Store Connect. Text changes to approved"
+            "\nproducts go back through review with your next submission."
+        )
+    else:
+        print("\nDRY RUN — nothing written. Re-run with --apply to push.")
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="asokit",
@@ -436,6 +507,30 @@ def build_parser():
     push.add_argument("--app-id")
     push.add_argument("--apply", action="store_true")
     push.set_defaults(func=cmd_metadata_push)
+
+    products_command = subcommands.add_parser(
+        "products", help="validate and sync IAP/subscription text"
+    )
+    products_sub = products_command.add_subparsers(dest="products_command", required=True)
+
+    products_check = products_sub.add_parser("check", help="validate product text limits")
+    products_check.add_argument("file")
+    products_check.set_defaults(func=cmd_products_check)
+
+    products_status = products_sub.add_parser(
+        "status", help="list products and existing localizations"
+    )
+    products_status.add_argument("--app-id")
+    products_status.add_argument("--json", action="store_true", help="also dump raw JSON")
+    products_status.set_defaults(func=cmd_products_status)
+
+    products_push = products_sub.add_parser(
+        "push", help="sync product text (dry run unless --apply)"
+    )
+    products_push.add_argument("file")
+    products_push.add_argument("--app-id")
+    products_push.add_argument("--apply", action="store_true")
+    products_push.set_defaults(func=cmd_products_push)
 
     return parser
 

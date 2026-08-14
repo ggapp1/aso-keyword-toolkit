@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **`asokit products`** — validate and sync in-app purchase, subscription, and
+  subscription-group localizations (`status` / `check` / `push`, dry run by
+  default). File format maps product id → locale → name/description; a
+  `group:` prefix addresses a subscription group by reference name. Unchanged
+  locales are skipped so re-running an applied file is a no-op — that matters
+  because any real write to an approved product sends it back into review.
+- `metadata push` survives App Store Connect auto-creating the paired
+  appStoreVersionLocalization: on a 409 it adopts the existing resource and
+  patches it instead of aborting.
+- `metadata check` accepts `supportUrl` and `marketingUrl`.
+
 ## 0.2.0
 
 - **Off-category detection.** Terms answered by apps in a different App Store
