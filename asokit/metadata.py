@@ -19,7 +19,9 @@ LIMITS = {
 }
 
 APP_INFO_FIELDS = frozenset({"name", "subtitle", "privacyPolicyUrl"})
-VERSION_FIELDS = frozenset({"keywords", "description", "promotionalText", "whatsNew"})
+VERSION_FIELDS = frozenset(
+    {"keywords", "description", "promotionalText", "whatsNew", "supportUrl", "marketingUrl"}
+)
 KNOWN_FIELDS = APP_INFO_FIELDS | VERSION_FIELDS
 
 _WORD_SEPARATORS = ":,-–—/&|"
