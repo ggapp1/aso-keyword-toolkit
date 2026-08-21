@@ -86,7 +86,11 @@ def token():
     )
 
 
-def call(method, path, bearer, body=None):
+RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+MAX_ATTEMPTS = 4
+
+
+def _request(method, path, bearer, body=None):
     url = path if path.startswith("http") else f"{API}{path}"
     request = urllib.request.Request(
         url, data=json.dumps(body).encode() if body else None, method=method
@@ -94,20 +98,49 @@ def call(method, path, bearer, body=None):
     request.add_header("Authorization", f"Bearer {bearer}")
     if body:
         request.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            raw = response.read().decode()
-            return json.loads(raw) if raw else {}
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode()
+    with urllib.request.urlopen(request, timeout=30) as response:
+        raw = response.read().decode()
+        return json.loads(raw) if raw else {}
+
+
+def call(method, path, bearer, body=None):
+    """One request, retrying rate limits and transient server errors."""
+    url = path if path.startswith("http") else f"{API}{path}"
+    for attempt in range(MAX_ATTEMPTS):
         try:
-            errors = json.loads(detail).get("errors", [])
-            detail = "\n".join(
-                f"  {item.get('title')}: {item.get('detail')}" for item in errors
+            return _request(method, path, bearer, body)
+        except urllib.error.HTTPError as error:
+            if error.code in RETRY_STATUSES and attempt < MAX_ATTEMPTS - 1:
+                time.sleep(2 ** attempt)
+                continue
+            detail = error.read().decode()
+            try:
+                errors = json.loads(detail).get("errors", [])
+                detail = "\n".join(
+                    f"  {item.get('title')}: {item.get('detail')}" for item in errors
+                )
+            except json.JSONDecodeError:
+                pass
+            raise ASCError(
+                f"App Store Connect returned {error.code} for {method} {url}\n{detail}"
             )
-        except json.JSONDecodeError:
-            pass
-        raise ASCError(f"App Store Connect returned {error.code} for {method} {url}\n{detail}")
+
+
+def call_all(method, path, bearer, body=None):
+    """Every page of a paged collection, concatenated.
+
+    App Store Connect caps a page at 200 rows and puts the next page's absolute
+    URL in `links.next`. `call` already accepts an absolute URL, so following
+    the chain needs no extra plumbing. Price point listings run to thousands of
+    rows — reading only the first page silently selects the wrong base price.
+    """
+    items = []
+    url = path
+    while url:
+        page = call(method, url, bearer, body)
+        items.extend(page.get("data", []))
+        url = page.get("links", {}).get("next")
+    return items
 
 
 def editable_version(app_id, bearer):
