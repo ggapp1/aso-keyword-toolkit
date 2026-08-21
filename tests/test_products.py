@@ -282,6 +282,17 @@ class PlanDrift(unittest.TestCase):
             products.plan(declarative(), inventory)
         self.assertIn("subscriptionPeriod", str(caught.exception))
 
+    def test_subscription_in_another_group_raises_before_any_write(self):
+        inventory = provisioned_inventory()
+        inventory["subscriptionGroups"][0]["referenceName"] = "Legacy"
+        with self.assertRaises(products.PlanError) as caught:
+            products.plan(declarative(), inventory)
+        message = str(caught.exception)
+        self.assertIn("com.example.pro.annual", message)
+        self.assertIn("Legacy", message)
+        self.assertIn("Pro", message)
+        self.assertIn("does not move subscriptions between groups", message)
+
     def test_changed_localization_text_updates_rather_than_creates(self):
         inventory = provisioned_inventory()
         localization = inventory["subscriptionGroups"][0]["subscriptions"][0]["localizations"]

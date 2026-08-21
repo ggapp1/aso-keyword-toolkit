@@ -287,7 +287,7 @@ def plan(desired, inventory):
     """
     groups = {g["referenceName"]: g for g in inventory.get("subscriptionGroups", [])}
     subscriptions = {
-        subscription["productId"]: subscription
+        subscription["productId"]: (group["referenceName"], subscription)
         for group in inventory.get("subscriptionGroups", [])
         for subscription in group.get("subscriptions", [])
     }
@@ -311,7 +311,15 @@ def plan(desired, inventory):
 
         for subscription in group.get("subscriptions", []):
             product_id = subscription["productId"]
-            live = subscriptions.get(product_id)
+            live_group_name, live = subscriptions.get(product_id, (None, None))
+            if live is not None and live_group_name != reference:
+                raise PlanError(
+                    f"{product_id}: lives in subscription group "
+                    f"{live_group_name!r} in App Store Connect but is declared "
+                    f"under {reference!r} in the file. This tool does not move "
+                    "subscriptions between groups — fix the file, or move the "
+                    "product by hand in App Store Connect. Nothing was sent."
+                )
             attributes = {
                 "name": subscription["name"],
                 "productId": product_id,
@@ -377,6 +385,8 @@ def plan(desired, inventory):
                 )
 
             availability = subscription.get("availability")
+            # The inventory normalizes availability to exactly
+            # {"allTerritories": bool}, so whole-dict equality is safe here.
             if availability and (live or {}).get("availability") != availability:
                 actions.append(
                     {
