@@ -340,8 +340,39 @@ def _subscription_prices(bearer, subscription_id):
     return prices
 
 
+# Every App Store territory, read once per process. The list changes a few
+# times a decade, and it is needed once per subscription both to judge
+# availability and to write it — re-reading a 175-row page per product would
+# add a request to every product in the catalogue for no new information.
+_TERRITORY_CACHE = {}
+
+
+def _all_territory_ids(bearer):
+    """Sorted ids of every territory App Store Connect sells in."""
+    if not _TERRITORY_CACHE.get("ids"):
+        _TERRITORY_CACHE["ids"] = sorted(
+            row["id"] for row in call_all("GET", "/territories?limit=200", bearer)
+        )
+    return _TERRITORY_CACHE["ids"]
+
+
 def _subscription_availability(bearer, subscription_id):
-    """{'allTerritories': bool} or None when availability has never been set."""
+    """{'allTerritories': bool} or None when availability has never been set.
+
+    `availableInNewTerritories` is NOT "on sale everywhere". It means only
+    "auto-enrol in territories Apple adds in FUTURE", and says nothing about
+    the storefronts that exist today — those live in the `availableTerritories`
+    relationship, which is separate, required, and 175 rows long. Echoing the
+    attribute would report a subscription sold in twelve storefronts as fully
+    available, and `plan()` would then call it converged forever.
+
+    So the bool is computed honestly: true only when the product sells in every
+    territory AND auto-enrols new ones.
+
+    The returned shape stays exactly {"allTerritories": bool}. `plan()` compares
+    availability by whole-dict equality, so any extra key here would re-emit
+    setAvailability on every single run.
+    """
     try:
         response = call(
             "GET", f"/subscriptions/{subscription_id}/subscriptionAvailability", bearer
@@ -351,11 +382,25 @@ def _subscription_availability(bearer, subscription_id):
     data = response.get("data")
     if not data:
         return None
-    return {
-        "allTerritories": bool(
-            data.get("attributes", {}).get("availableInNewTerritories")
-        )
-    }
+    everywhere = bool(data.get("attributes", {}).get("availableInNewTerritories"))
+    if everywhere:
+        # Only worth the extra page when the answer could still be true.
+        # `relationships/...` returns bare {type, id} linkage — cheaper than the
+        # related resource, and paginated, so call_all is required: reading one
+        # default-sized page would undercount and report False forever.
+        covered = {
+            row["id"]
+            for row in call_all(
+                "GET",
+                f"/subscriptionAvailabilities/{data['id']}"
+                "/relationships/availableTerritories?limit=200",
+                bearer,
+            )
+            if row.get("id")
+        }
+        every = set(_all_territory_ids(bearer))
+        everywhere = bool(every) and every.issubset(covered)
+    return {"allTerritories": everywhere}
 
 
 def products_status(app_id, bearer):
@@ -749,6 +794,20 @@ def apply_products(app_id, desired, bearer, apply=False):
 
         elif kind == "setAvailability":
             subscription_id = ids.get(action["productId"])
+            # `availableTerritories` is REQUIRED by App Store Connect on this
+            # POST (Apple's own schema marks the relationship, and its `data`,
+            # required). Sending only the attribute is rejected — which would
+            # abort at the LAST write of every subscription, leaving each one
+            # fully created and priced but never put on sale.
+            #
+            # The file cannot express a territory subset, so the list written is
+            # always every territory; `allTerritories` drives the future-enrol
+            # attribute. Read that as "all territories, including ones Apple
+            # adds later": false still sells in all 175 today, it just stops
+            # auto-enrolling new ones. Surfaced as territoryCount so a dry run
+            # states the number out loud before anyone approves it.
+            territories = _all_territory_ids(bearer)
+            action["territoryCount"] = len(territories)
             if apply and subscription_id:
                 call(
                     "POST",
@@ -766,7 +825,13 @@ def apply_products(app_id, desired, bearer, apply=False):
                                         "type": "subscriptions",
                                         "id": subscription_id,
                                     }
-                                }
+                                },
+                                "availableTerritories": {
+                                    "data": [
+                                        {"type": "territories", "id": territory}
+                                        for territory in territories
+                                    ]
+                                },
                             },
                         }
                     },
