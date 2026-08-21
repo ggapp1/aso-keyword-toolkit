@@ -45,6 +45,9 @@ PERIODS = frozenset(
 
 REVIEW_NOTE_LIMIT = 4000
 
+IMMUTABLE_SUBSCRIPTION_ATTRS = ("subscriptionPeriod",)
+MUTABLE_SUBSCRIPTION_ATTRS = ("name", "groupLevel", "familySharable", "reviewNote")
+
 
 def is_declarative(data):
     """True for the `{"groups": [...]}` shape, false for the flat locale map."""
@@ -244,6 +247,146 @@ def _check_declarative(data):
                 problems,
             )
     return problems
+
+
+class PlanError(Exception):
+    """The file cannot be reconciled with live state without destroying something."""
+
+
+def _localization_actions(parent_kind, parent_key, desired, existing):
+    """create/update/skip per locale for one parent resource."""
+    actions = []
+    for locale, fields in sorted(desired.items()):
+        current = existing.get(locale)
+        if current and all(current.get(k) == v for k, v in fields.items()):
+            actions.append(
+                {
+                    "kind": "skip",
+                    "what": f"{parent_key} {locale} localization",
+                }
+            )
+            continue
+        actions.append(
+            {
+                "kind": "updateLocalization" if current else "createLocalization",
+                "parentKind": parent_kind,
+                "parentKey": parent_key,
+                "locale": locale,
+                "fields": dict(fields),
+                "id": current["id"] if current else None,
+            }
+        )
+    return actions
+
+
+def plan(desired, inventory):
+    """Diff the desired file against live inventory. Pure — no I/O.
+
+    Returns an ordered action list. Raises PlanError when the file disagrees
+    with live state on an attribute App Store Connect will not change.
+    """
+    groups = {g["referenceName"]: g for g in inventory.get("subscriptionGroups", [])}
+    subscriptions = {
+        subscription["productId"]: subscription
+        for group in inventory.get("subscriptionGroups", [])
+        for subscription in group.get("subscriptions", [])
+    }
+
+    actions = []
+    for group in desired.get("groups", []):
+        reference = group["referenceName"]
+        live_group = groups.get(reference)
+        if live_group is None:
+            actions.append({"kind": "createGroup", "referenceName": reference})
+        else:
+            actions.append({"kind": "skip", "what": f"group '{reference}'"})
+        actions.extend(
+            _localization_actions(
+                "group",
+                reference,
+                group.get("localizations", {}),
+                (live_group or {}).get("localizations", {}),
+            )
+        )
+
+        for subscription in group.get("subscriptions", []):
+            product_id = subscription["productId"]
+            live = subscriptions.get(product_id)
+            attributes = {
+                "name": subscription["name"],
+                "productId": product_id,
+                "subscriptionPeriod": subscription["subscriptionPeriod"],
+            }
+            for key in ("groupLevel", "familySharable", "reviewNote"):
+                if subscription.get(key) is not None:
+                    attributes[key] = subscription[key]
+
+            if live is None:
+                actions.append(
+                    {
+                        "kind": "createSubscription",
+                        "group": reference,
+                        "productId": product_id,
+                        "attributes": attributes,
+                    }
+                )
+            else:
+                for key in IMMUTABLE_SUBSCRIPTION_ATTRS:
+                    if live["attributes"].get(key) != subscription[key]:
+                        raise PlanError(
+                            f"{product_id}: {key} is {live['attributes'].get(key)!r} in "
+                            f"App Store Connect but {subscription[key]!r} in the file. "
+                            "This attribute cannot be changed after creation — fix the "
+                            "file, or create a new product id. Nothing was sent."
+                        )
+                drifted = {
+                    key: subscription[key]
+                    for key in MUTABLE_SUBSCRIPTION_ATTRS
+                    if subscription.get(key) is not None
+                    and live["attributes"].get(key) != subscription[key]
+                }
+                if drifted:
+                    actions.append(
+                        {
+                            "kind": "patchSubscription",
+                            "productId": product_id,
+                            "attributes": drifted,
+                        }
+                    )
+                else:
+                    actions.append({"kind": "skip", "what": product_id})
+
+            actions.extend(
+                _localization_actions(
+                    "subscription",
+                    product_id,
+                    subscription.get("localizations", {}),
+                    (live or {}).get("localizations", {}),
+                )
+            )
+
+            price = subscription.get("price")
+            if price:
+                actions.append(
+                    {
+                        "kind": "setPrices",
+                        "productId": product_id,
+                        "baseTerritory": price["baseTerritory"],
+                        "customerPrice": price["customerPrice"],
+                    }
+                )
+
+            availability = subscription.get("availability")
+            if availability and (live or {}).get("availability") != availability:
+                actions.append(
+                    {
+                        "kind": "setAvailability",
+                        "productId": product_id,
+                        "allTerritories": availability.get("allTerritories", True),
+                    }
+                )
+
+    return actions
 
 
 def usage(products):
