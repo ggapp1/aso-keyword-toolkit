@@ -86,8 +86,28 @@ def token():
     )
 
 
-RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+RATE_LIMITED = 429
+TRANSIENT_SERVER_ERRORS = frozenset({500, 502, 503, 504})
 MAX_ATTEMPTS = 4
+
+
+def _retryable(method, code):
+    """Whether repeating this exact request is safe.
+
+    The asymmetry is deliberate. A 429 means App Store Connect turned the
+    request away *without processing it*, so repeating it cannot duplicate
+    anything — and rate limits are the whole reason retry exists here, at a few
+    hundred writes per run. A 5xx is ambiguous: the write may well have landed
+    and only the response was lost, so repeating it is only safe when the
+    request changes nothing, i.e. a GET.
+
+    Not retrying a failed write costs little, because a run is re-runnable:
+    `plan()` and `price_diff()` re-diff against live state and skip whatever
+    already applied.
+    """
+    if code == RATE_LIMITED:
+        return True
+    return code in TRANSIENT_SERVER_ERRORS and method.upper() == "GET"
 
 
 def _request(method, path, bearer, body=None):
@@ -104,13 +124,13 @@ def _request(method, path, bearer, body=None):
 
 
 def call(method, path, bearer, body=None):
-    """One request, retrying rate limits and transient server errors."""
+    """One request, retrying rate limits (any method) and 5xx (GET only)."""
     url = path if path.startswith("http") else f"{API}{path}"
     for attempt in range(MAX_ATTEMPTS):
         try:
             return _request(method, path, bearer, body)
         except urllib.error.HTTPError as error:
-            if error.code in RETRY_STATUSES and attempt < MAX_ATTEMPTS - 1:
+            if _retryable(method, error.code) and attempt < MAX_ATTEMPTS - 1:
                 time.sleep(2 ** attempt)
                 continue
             detail = error.read().decode()
