@@ -29,6 +29,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from . import products as prod
 from .metadata import APP_INFO_FIELDS, VERSION_FIELDS
 
 API = "https://api.appstoreconnect.apple.com/v1"
@@ -314,9 +315,46 @@ def _product_localizations(bearer, kind, parent_id):
             "id": item["id"],
             "name": item["attributes"].get("name"),
             "description": item["attributes"].get("description"),
+            "customAppName": item["attributes"].get("customAppName"),
             "state": item["attributes"].get("state"),
         }
         for item in listing["data"]
+    }
+
+
+def _subscription_prices(bearer, subscription_id):
+    """Current {territory id: price point id} for a subscription."""
+    rows = call_all(
+        "GET",
+        f"/subscriptions/{subscription_id}/prices"
+        "?include=territory,subscriptionPricePoint&limit=200",
+        bearer,
+    )
+    prices = {}
+    for row in rows:
+        relationships = row.get("relationships", {})
+        territory = relationships.get("territory", {}).get("data") or {}
+        point = relationships.get("subscriptionPricePoint", {}).get("data") or {}
+        if territory.get("id") and point.get("id"):
+            prices[territory["id"]] = point["id"]
+    return prices
+
+
+def _subscription_availability(bearer, subscription_id):
+    """{'allTerritories': bool} or None when availability has never been set."""
+    try:
+        response = call(
+            "GET", f"/subscriptions/{subscription_id}/subscriptionAvailability", bearer
+        )
+    except ASCError:
+        return None
+    data = response.get("data")
+    if not data:
+        return None
+    return {
+        "allTerritories": bool(
+            data.get("attributes", {}).get("availableInNewTerritories")
+        )
     }
 
 
@@ -326,6 +364,8 @@ def products_status(app_id, bearer):
     Returns {"subscriptionGroups": [...], "inAppPurchases": [...]} where each
     product carries its ASC id, product id, state, and locale map — the same
     inventory `push_products` resolves against, so a dry run needs no writes.
+    Subscriptions additionally carry `attributes`, `prices` and `availability`,
+    which is everything `products.plan()` diffs against.
     """
     result = {"subscriptionGroups": [], "inAppPurchases": []}
 
@@ -341,14 +381,25 @@ def products_status(app_id, bearer):
             "GET", f"/subscriptionGroups/{group['id']}/subscriptions", bearer
         )
         for subscription in subscriptions.get("data", []):
+            subscription_id = subscription["id"]
+            attributes = subscription["attributes"]
             entry["subscriptions"].append(
                 {
-                    "id": subscription["id"],
-                    "productId": subscription["attributes"]["productId"],
-                    "state": subscription["attributes"].get("state"),
+                    "id": subscription_id,
+                    "productId": attributes["productId"],
+                    "state": attributes.get("state"),
+                    "attributes": {
+                        "name": attributes.get("name"),
+                        "subscriptionPeriod": attributes.get("subscriptionPeriod"),
+                        "groupLevel": attributes.get("groupLevel"),
+                        "familySharable": attributes.get("familySharable"),
+                        "reviewNote": attributes.get("reviewNote"),
+                    },
                     "localizations": _product_localizations(
-                        bearer, "subscription", subscription["id"]
+                        bearer, "subscription", subscription_id
                     ),
+                    "prices": _subscription_prices(bearer, subscription_id),
+                    "availability": _subscription_availability(bearer, subscription_id),
                 }
             )
         result["subscriptionGroups"].append(entry)
@@ -491,3 +542,237 @@ def _write(bearer, resource_type, existing_id, attributes, locale, parent):
             bearer,
             {"data": {"type": resource_type, "id": adopted, "attributes": attributes}},
         )
+
+
+def _resolve_price_points(bearer, subscription_id, base_territory, customer_price):
+    """{territory: price point id} for `customer_price` in every territory.
+
+    Selects the base territory's point by EXACT customer price and fails loudly
+    otherwise — silently taking the nearest tier would misprice the product in
+    every storefront at once.
+    """
+    points = call_all(
+        "GET",
+        f"/subscriptions/{subscription_id}/pricePoints"
+        f"?filter[territory]={base_territory}&limit=200",
+        bearer,
+    )
+    match = next(
+        (p for p in points if p["attributes"].get("customerPrice") == customer_price),
+        None,
+    )
+    if match is None:
+        available = sorted(
+            {p["attributes"].get("customerPrice") for p in points if p.get("attributes")}
+        )
+        raise ASCError(
+            f"no {base_territory} price point at exactly {customer_price}. "
+            f"Nearby tiers: {', '.join(available[:10])}"
+        )
+    # `include=territory` is load-bearing, not decoration: without it App Store
+    # Connect returns the 170-odd equalized points but leaves
+    # relationships.territory.data absent, so every row is skipped and only the
+    # base territory resolves — which prices the product in one storefront and
+    # silently leaves every other one unset. Verified live 2026-08-21.
+    equalized = call_all(
+        "GET",
+        f"/subscriptionPricePoints/{match['id']}/equalizations"
+        "?include=territory&limit=200",
+        bearer,
+    )
+    resolved = {base_territory: match["id"]}
+    for point in equalized:
+        territory = (
+            point.get("relationships", {}).get("territory", {}).get("data") or {}
+        )
+        if territory.get("id"):
+            resolved[territory["id"]] = point["id"]
+    return resolved
+
+
+def apply_products(app_id, desired, bearer, apply=False):
+    """Reconcile App Store Connect with `desired`. Dry run unless apply=True."""
+    inventory = products_status(app_id, bearer)
+    actions = prod.plan(desired, inventory)
+
+    ids = {
+        f"group:{group['referenceName']}": group["id"]
+        for group in inventory["subscriptionGroups"]
+    }
+    ids.update(
+        {
+            subscription["productId"]: subscription["id"]
+            for group in inventory["subscriptionGroups"]
+            for subscription in group["subscriptions"]
+        }
+    )
+    live_prices = {
+        subscription["productId"]: subscription["prices"]
+        for group in inventory["subscriptionGroups"]
+        for subscription in group["subscriptions"]
+    }
+
+    executed = []
+    for action in actions:
+        kind = action["kind"]
+        action = dict(action, applied=False)
+
+        if kind == "skip":
+            executed.append(action)
+            continue
+
+        if kind == "createGroup":
+            if apply:
+                created = call(
+                    "POST",
+                    "/subscriptionGroups",
+                    bearer,
+                    {
+                        "data": {
+                            "type": "subscriptionGroups",
+                            "attributes": {"referenceName": action["referenceName"]},
+                            "relationships": {
+                                "app": {"data": {"type": "apps", "id": str(app_id)}}
+                            },
+                        }
+                    },
+                )
+                ids[f"group:{action['referenceName']}"] = created["data"]["id"]
+                action["applied"] = True
+
+        elif kind == "createSubscription":
+            group_id = ids.get(f"group:{action['group']}")
+            if apply:
+                created = call(
+                    "POST",
+                    "/subscriptions",
+                    bearer,
+                    {
+                        "data": {
+                            "type": "subscriptions",
+                            "attributes": action["attributes"],
+                            "relationships": {
+                                "group": {
+                                    "data": {
+                                        "type": "subscriptionGroups",
+                                        "id": group_id,
+                                    }
+                                }
+                            },
+                        }
+                    },
+                )
+                ids[action["productId"]] = created["data"]["id"]
+                action["applied"] = True
+
+        elif kind == "patchSubscription":
+            if apply:
+                subscription_id = ids[action["productId"]]
+                call(
+                    "PATCH",
+                    f"/subscriptions/{subscription_id}",
+                    bearer,
+                    {
+                        "data": {
+                            "type": "subscriptions",
+                            "id": subscription_id,
+                            "attributes": action["attributes"],
+                        }
+                    },
+                )
+                action["applied"] = True
+
+        elif kind in ("createLocalization", "updateLocalization"):
+            if apply:
+                parent_kind = "group" if action["parentKind"] == "group" else "subscription"
+                resource_type, relationship, parent_type = _PRODUCT_RESOURCES[parent_kind]
+                key = (
+                    f"group:{action['parentKey']}"
+                    if parent_kind == "group"
+                    else action["parentKey"]
+                )
+                _write(
+                    bearer,
+                    resource_type,
+                    action["id"],
+                    action["fields"],
+                    action["locale"],
+                    (relationship, parent_type, ids[key]),
+                )
+                action["applied"] = True
+
+        elif kind == "setPrices":
+            subscription_id = ids.get(action["productId"])
+            if subscription_id is None:
+                action["territories"] = None
+                action["note"] = "subscription not created yet (dry run)"
+                executed.append(action)
+                continue
+            resolved = _resolve_price_points(
+                bearer,
+                subscription_id,
+                action["baseTerritory"],
+                action["customerPrice"],
+            )
+            pending = prod.price_diff(
+                live_prices.get(action["productId"], {}), resolved
+            )
+            action["territories"] = pending
+            if apply:
+                for territory in pending:
+                    call(
+                        "POST",
+                        "/subscriptionPrices",
+                        bearer,
+                        {
+                            "data": {
+                                "type": "subscriptionPrices",
+                                "attributes": {"preserveCurrentPrice": False},
+                                "relationships": {
+                                    "subscription": {
+                                        "data": {
+                                            "type": "subscriptions",
+                                            "id": subscription_id,
+                                        }
+                                    },
+                                    "subscriptionPricePoint": {
+                                        "data": {
+                                            "type": "subscriptionPricePoints",
+                                            "id": resolved[territory],
+                                        }
+                                    },
+                                },
+                            }
+                        },
+                    )
+                action["applied"] = bool(pending)
+
+        elif kind == "setAvailability":
+            subscription_id = ids.get(action["productId"])
+            if apply and subscription_id:
+                call(
+                    "POST",
+                    "/subscriptionAvailabilities",
+                    bearer,
+                    {
+                        "data": {
+                            "type": "subscriptionAvailabilities",
+                            "attributes": {
+                                "availableInNewTerritories": action["allTerritories"]
+                            },
+                            "relationships": {
+                                "subscription": {
+                                    "data": {
+                                        "type": "subscriptions",
+                                        "id": subscription_id,
+                                    }
+                                }
+                            },
+                        }
+                    },
+                )
+                action["applied"] = True
+
+        executed.append(action)
+
+    return executed

@@ -409,11 +409,11 @@ def cmd_products_status(args):
         for subscription in group["subscriptions"]:
             print(f"  {subscription['productId']} — {subscription['state']}")
             for locale, item in sorted(subscription["localizations"].items()):
-                print(f"    {locale:<8} {item['name']!r} / {item['description']!r} [{item['state']}]")
+                print(f"    {locale:<8} {item.get('name')!r} / {item.get('description')!r} [{item.get('state')}]")
     for iap in inventory["inAppPurchases"]:
         print(f"in-app purchase {iap['productId']} — {iap['state']}")
         for locale, item in sorted(iap["localizations"].items()):
-            print(f"    {locale:<8} {item['name']!r} / {item['description']!r} [{item['state']}]")
+            print(f"    {locale:<8} {item.get('name')!r} / {item.get('description')!r} [{item.get('state')}]")
     if args.json:
         print(json.dumps(inventory, indent=2, ensure_ascii=False))
 
