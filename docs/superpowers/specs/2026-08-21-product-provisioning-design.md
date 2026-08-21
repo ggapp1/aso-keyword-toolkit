@@ -209,7 +209,10 @@ product. `plan()` raises; nothing is sent.
 The price rule is the one that earns the pure-function treatment. Current
 prices come from `GET /v1/subscriptions/{id}/prices?include=territory,subscriptionPricePoint`,
 which yields a `{territory: pricePointId}` map. The desired map comes from the
-base price point's `equalizations`. Only the symmetric difference is written.
+base price point's `equalizations`. Only territories whose price point differs
+are written — the diff is deliberately one-sided: `price_diff` iterates the
+desired map alone, so a territory priced today but absent from the desired map
+is left alone. This tool provisions prices; it does not retract them.
 
 **Price points must be asserted, not assumed.** `pricePoints` is nested under a
 subscription — there is no global list — so the exact tier for $4.99 / $24.99
