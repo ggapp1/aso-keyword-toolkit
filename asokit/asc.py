@@ -24,6 +24,7 @@ this toolkit is standard library only.
 
 import json
 import os
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -145,6 +146,21 @@ def call(method, path, bearer, body=None):
             raise ASCError(
                 f"App Store Connect returned {error.code} for {method} {url}\n{detail}"
             )
+        except (urllib.error.URLError, socket.timeout) as error:
+            # Ordering matters: HTTPError subclasses URLError, so this clause
+            # only ever sees a genuine transport failure — DNS, refused
+            # connection, TLS, or a socket timeout. Deliberately NOT retried:
+            # unlike a 429 (definitively unprocessed), a lost connection leaves
+            # a write ambiguous, exactly like the 5xx case above. Wrapping it in
+            # ASCError is what buys the operator the CLI's recovery guidance
+            # instead of a traceback mid-apply.
+            reason = getattr(error, "reason", error) or error
+            raise ASCError(
+                f"could not reach App Store Connect for {method} {url}: {reason}\n"
+                "  This is a network/transport failure, not a rejection by "
+                "Apple. The request may or may not have been processed — "
+                "re-run to re-diff against live state."
+            )
 
 
 def call_all(method, path, bearer, body=None):
@@ -160,7 +176,10 @@ def call_all(method, path, bearer, body=None):
     while url:
         page = call(method, url, bearer, body)
         items.extend(page.get("data", []))
-        url = page.get("links", {}).get("next")
+        # `links` can be present-but-null, not just missing: `.get("links", {})`
+        # alone raises AttributeError on None, which is not an ASCError and so
+        # escapes the CLI's handler as a traceback.
+        url = (page.get("links") or {}).get("next")
     return items
 
 
@@ -308,8 +327,17 @@ def _parent_url(parent_type, parent_id):
 
 
 def _product_localizations(bearer, kind, parent_id):
+    """Every locale on one product. Paged: a 21-locale app overruns page one.
+
+    `call_all`, not `call`, is load-bearing. A locale past the first page reads
+    as absent, so `plan()` emits createLocalization; the create fails with
+    "already exists"; `_write` adopts and PATCHes — rewriting text on an
+    APPROVED product and sending it back into review, silently.
+    """
     resource_type, _, parent_type = _PRODUCT_RESOURCES[kind]
-    listing = call("GET", f"{_parent_url(parent_type, parent_id)}/{resource_type}", bearer)
+    listing = call_all(
+        "GET", f"{_parent_url(parent_type, parent_id)}/{resource_type}", bearer
+    )
     return {
         item["attributes"]["locale"]: {
             "id": item["id"],
@@ -318,7 +346,7 @@ def _product_localizations(bearer, kind, parent_id):
             "customAppName": item["attributes"].get("customAppName"),
             "state": item["attributes"].get("state"),
         }
-        for item in listing["data"]
+        for item in listing
     }
 
 
@@ -369,9 +397,9 @@ def _subscription_availability(bearer, subscription_id):
     So the bool is computed honestly: true only when the product sells in every
     territory AND auto-enrols new ones.
 
-    The returned shape stays exactly {"allTerritories": bool}. `plan()` compares
-    availability by whole-dict equality, so any extra key here would re-emit
-    setAvailability on every single run.
+    Returns {"allTerritories": bool}. `plan()` reads that one field rather than
+    comparing the whole dict, so extra keys here would not break convergence —
+    but nothing else wants them either, so the shape stays narrow.
     """
     try:
         response = call(
@@ -414,18 +442,21 @@ def products_status(app_id, bearer):
     """
     result = {"subscriptionGroups": [], "inAppPurchases": []}
 
-    groups = call("GET", f"/apps/{app_id}/subscriptionGroups", bearer)
-    for group in groups.get("data", []):
+    # Every listing here is paged, and this inventory now feeds a writer: a row
+    # missing from a truncated page reads as "does not exist", which turns into
+    # a create POST against something that is already live.
+    groups = call_all("GET", f"/apps/{app_id}/subscriptionGroups", bearer)
+    for group in groups:
         entry = {
             "id": group["id"],
             "referenceName": group["attributes"]["referenceName"],
             "localizations": _product_localizations(bearer, "group", group["id"]),
             "subscriptions": [],
         }
-        subscriptions = call(
+        subscriptions = call_all(
             "GET", f"/subscriptionGroups/{group['id']}/subscriptions", bearer
         )
-        for subscription in subscriptions.get("data", []):
+        for subscription in subscriptions:
             subscription_id = subscription["id"]
             attributes = subscription["attributes"]
             entry["subscriptions"].append(
@@ -449,8 +480,8 @@ def products_status(app_id, bearer):
             )
         result["subscriptionGroups"].append(entry)
 
-    iaps = call("GET", f"/apps/{app_id}/inAppPurchasesV2", bearer)
-    for iap in iaps.get("data", []):
+    iaps = call_all("GET", f"/apps/{app_id}/inAppPurchasesV2", bearer)
+    for iap in iaps:
         result["inAppPurchases"].append(
             {
                 "id": iap["id"],
@@ -570,11 +601,13 @@ def _write(bearer, resource_type, existing_id, attributes, locale, parent):
         # the locale already there. Adopt it and patch instead of aborting.
         if "already exists" not in str(error):
             raise
-        listing = call("GET", f"{_parent_url(parent_type, parent_id)}/{resource_type}", bearer)
+        listing = call_all(
+            "GET", f"{_parent_url(parent_type, parent_id)}/{resource_type}", bearer
+        )
         adopted = next(
             (
                 item["id"]
-                for item in listing["data"]
+                for item in listing
                 if item["attributes"]["locale"] == locale
             ),
             None,
@@ -607,9 +640,24 @@ def _resolve_price_points(bearer, subscription_id, base_territory, customer_pric
         None,
     )
     if match is None:
+        # Filter None before sorting: one price point row without a
+        # customerPrice would mix None with str and raise TypeError here,
+        # replacing the intended ASCError with a crash on the error path.
         available = sorted(
-            {p["attributes"].get("customerPrice") for p in points if p.get("attributes")}
+            {
+                p["attributes"].get("customerPrice")
+                for p in points
+                if p.get("attributes")
+            }
+            - {None}
         )
+        if not available:
+            raise ASCError(
+                f"no price points at all for territory {base_territory!r}, so "
+                f"{customer_price} cannot be matched. The most likely cause is "
+                "a mistyped baseTerritory — App Store Connect wants a "
+                "three-letter code such as 'USA'."
+            )
         raise ASCError(
             f"no {base_territory} price point at exactly {customer_price}. "
             f"Nearby tiers: {', '.join(available[:10])}"

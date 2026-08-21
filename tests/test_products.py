@@ -178,10 +178,46 @@ class RequiredProvisioningFields(unittest.TestCase):
         self.assertIn("every territory", problems[0])
         self.assertIn("App Store Connect", problems[0])
 
-    def test_availability_stays_optional(self):
+    def test_requires_availability(self):
+        """Omitting it used to validate clean and provision a dead product.
+
+        `check` returned [] and `plan` emitted createSubscription + setPrices
+        with no setAvailability, leaving the product priced in 175 territories
+        and on sale in none — permanently, since every later run re-validated
+        the same file clean.
+        """
         data = declarative()
         del data["groups"][0]["subscriptions"][0]["availability"]
-        self.assertEqual(products.check(data), [])
+        problems = products.check(data)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("com.example.pro.annual.availability: required", problems[0])
+        # Must name the fix, not just the omission.
+        self.assertIn('{"allTerritories": true}', problems[0])
+
+    def test_empty_availability_object_is_also_rejected(self):
+        """`{}` is falsy, so `plan()` skips it exactly like a missing key."""
+        problems = products.check(declarative(availability={}))
+        self.assertEqual(len(problems), 1)
+        self.assertIn("com.example.pro.annual.availability: required", problems[0])
+
+    def test_wrong_type_still_reports_the_type_not_the_absence(self):
+        """The required-key branch must not swallow a genuine type error."""
+        problems = products.check(declarative(availability="worldwide"))
+        self.assertEqual(
+            problems, ["com.example.pro.annual.availability: expected an object"]
+        )
+
+    def test_a_file_without_availability_still_plans_no_availability(self):
+        """Why `check` has to be the gate: `plan` cannot infer the missing key.
+
+        Pins the damage the check now prevents — prices written, availability
+        never — so anyone loosening the check sees what it was guarding.
+        """
+        data = declarative()
+        del data["groups"][0]["subscriptions"][0]["availability"]
+        planned = kinds(products.plan(data, EMPTY_INVENTORY))
+        self.assertIn("setPrices", planned)
+        self.assertNotIn("setAvailability", planned)
 
     def test_sample_file_is_clean_under_the_stricter_rules(self):
         self.assertEqual(products.check(declarative()), [])
@@ -278,6 +314,34 @@ class PlanIdempotence(unittest.TestCase):
         actions = products.plan(declarative(), inventory)
         self.assertNotIn("createGroup", kinds(actions))
         self.assertIn("createSubscription", kinds(actions))
+
+    def test_extra_key_in_availability_still_converges(self):
+        """The file's availability object is compared by field, not by dict.
+
+        `check` accepts extra keys, so whole-dict equality made a converged
+        product diff unequal forever: every `--apply` re-POSTed
+        /subscriptionAvailabilities against live state that already matched.
+        """
+        data = declarative(availability={"allTerritories": True, "note": "x"})
+        self.assertEqual(products.check(data), [])
+        actions = products.plan(data, provisioned_inventory())
+        self.assertNotIn("setAvailability", kinds(actions))
+
+    def test_availability_still_written_when_live_state_disagrees(self):
+        """Field comparison must not blunt the check into never firing."""
+        inventory = provisioned_inventory()
+        subscription = inventory["subscriptionGroups"][0]["subscriptions"][0]
+
+        subscription["availability"] = {"allTerritories": False}
+        self.assertIn(
+            "setAvailability", kinds(products.plan(declarative(), inventory))
+        )
+
+        # Never provisioned at all: `_subscription_availability` returns None.
+        subscription["availability"] = None
+        self.assertIn(
+            "setAvailability", kinds(products.plan(declarative(), inventory))
+        )
 
 
 class PlanDrift(unittest.TestCase):

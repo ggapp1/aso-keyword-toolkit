@@ -132,7 +132,11 @@ def _check_price(prefix, price, problems):
 
 
 def _check_availability(prefix, availability, problems):
-    """The key itself stays optional, but `false` is refused.
+    """Shape-check an `availability` object. `false` is refused.
+
+    The caller decides whether the key may be absent — `_check_subscription`
+    requires it, because a subscription provisioned without availability is
+    priced in every territory and on sale in none.
 
     `allTerritories: false` does not mean "somewhere smaller". The file has no
     way to name a territory subset, so the writer sends every territory either
@@ -221,7 +225,24 @@ def _check_subscription(prefix, subscription, problems):
                 f"limit is {REVIEW_NOTE_LIMIT}"
             )
     _check_price(prefix, subscription.get("price"), problems)
-    _check_availability(prefix, subscription.get("availability"), problems)
+    availability = subscription.get("availability")
+    # Absent OR `{}`, because `plan()` tests this object for truthiness, so an
+    # empty one behaves exactly like a missing key. Anything else, including a
+    # wrong type, falls through to `_check_availability` so the operator gets
+    # the message that actually fits.
+    #
+    # Not a style preference: without it `plan()` emits setPrices and no
+    # setAvailability, so the product lands priced in every territory and on
+    # sale in none — and no later run repairs it, because the file still
+    # validates clean.
+    if availability is None or availability == {}:
+        problems.append(
+            f"{prefix}.availability: required — a subscription provisioned "
+            "without it is priced in every territory and on sale in none. "
+            'Add {"allTerritories": true}.'
+        )
+    else:
+        _check_availability(prefix, availability, problems)
     _check_required_localizations(
         prefix,
         subscription.get("localizations"),
@@ -416,16 +437,23 @@ def plan(desired, inventory):
                 )
 
             availability = subscription.get("availability")
-            # The inventory normalizes availability to exactly
-            # {"allTerritories": bool}, so whole-dict equality is safe here.
-            if availability and (live or {}).get("availability") != availability:
-                actions.append(
-                    {
-                        "kind": "setAvailability",
-                        "productId": product_id,
-                        "allTerritories": availability.get("allTerritories", True),
-                    }
+            if availability:
+                # Compare the field, not the dict. Whole-dict equality made any
+                # extra key in the file's `availability` object — which `check`
+                # allows — diff unequal against live state forever, so a fully
+                # converged product re-POSTed its availability on every run.
+                desired_everywhere = availability.get("allTerritories", True)
+                live_everywhere = ((live or {}).get("availability") or {}).get(
+                    "allTerritories"
                 )
+                if desired_everywhere != live_everywhere:
+                    actions.append(
+                        {
+                            "kind": "setAvailability",
+                            "productId": product_id,
+                            "allTerritories": desired_everywhere,
+                        }
+                    )
 
     return actions
 

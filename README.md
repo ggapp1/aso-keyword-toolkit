@@ -380,10 +380,12 @@ Three things it will not do, each on purpose:
 - **Change what cannot be changed.** `productId` and `subscriptionPeriod` are
   fixed at creation. If the file disagrees with a live product, the run stops
   and tells you, before anything is sent.
-- **Narrow where you sell.** `availability` is all-territory or absent.
-  `allTerritories: false` is rejected rather than obeyed, because the file
-  cannot express a smaller set — restrict territories by hand in App Store
-  Connect instead.
+- **Narrow where you sell.** `availability` is required on every subscription,
+  and must be `{"allTerritories": true}`. `false` is rejected rather than
+  obeyed, because the file cannot express a smaller set — restrict territories
+  by hand in App Store Connect instead. It is required rather than optional
+  because a subscription provisioned without it comes out priced in every
+  territory and on sale in none, and no later run repairs that.
 - **Finish the submission.** Every new subscription lands in
   `MISSING_METADATA` until it has a review screenshot. Add those in App Store
   Connect, then submit the subscriptions alongside your next app version.
