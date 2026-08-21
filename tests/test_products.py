@@ -282,6 +282,14 @@ class PlanDrift(unittest.TestCase):
             products.plan(declarative(), inventory)
         self.assertIn("subscriptionPeriod", str(caught.exception))
 
+    def test_unset_immutable_is_completed_rather_than_refused(self):
+        inventory = provisioned_inventory()
+        subscription = inventory["subscriptionGroups"][0]["subscriptions"][0]
+        subscription["attributes"]["subscriptionPeriod"] = None
+        actions = products.plan(declarative(), inventory)
+        patch = next(a for a in actions if a["kind"] == "patchSubscription")
+        self.assertEqual(patch["attributes"]["subscriptionPeriod"], "ONE_YEAR")
+
     def test_subscription_in_another_group_raises_before_any_write(self):
         inventory = provisioned_inventory()
         inventory["subscriptionGroups"][0]["referenceName"] = "Legacy"

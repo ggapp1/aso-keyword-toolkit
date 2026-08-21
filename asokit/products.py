@@ -339,20 +339,29 @@ def plan(desired, inventory):
                     }
                 )
             else:
+                drifted = {}
                 for key in IMMUTABLE_SUBSCRIPTION_ATTRS:
-                    if live["attributes"].get(key) != subscription[key]:
+                    current = live["attributes"].get(key)
+                    if current is None:
+                        # Never set, not changed — App Store Connect leaves
+                        # these optional at creation, which is what a
+                        # MISSING_METADATA product is. Filling one in is a
+                        # patch. Refusing here would tell the user to burn a
+                        # product id, and ids can never be reused.
+                        drifted[key] = subscription[key]
+                    elif current != subscription[key]:
                         raise PlanError(
-                            f"{product_id}: {key} is {live['attributes'].get(key)!r} in "
+                            f"{product_id}: {key} is {current!r} in "
                             f"App Store Connect but {subscription[key]!r} in the file. "
                             "This attribute cannot be changed after creation — fix the "
                             "file, or create a new product id. Nothing was sent."
                         )
-                drifted = {
-                    key: subscription[key]
-                    for key in MUTABLE_SUBSCRIPTION_ATTRS
-                    if subscription.get(key) is not None
-                    and live["attributes"].get(key) != subscription[key]
-                }
+                for key in MUTABLE_SUBSCRIPTION_ATTRS:
+                    if (
+                        subscription.get(key) is not None
+                        and live["attributes"].get(key) != subscription[key]
+                    ):
+                        drifted[key] = subscription[key]
                 if drifted:
                     actions.append(
                         {
