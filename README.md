@@ -326,6 +326,71 @@ Validation runs before anything is sent, so a bad file fails locally rather
 than halfway through a batch. Credentials are read from the environment only;
 `.p8` keys are gitignored by default.
 
+### Subscriptions from one declarative file
+
+Creating a subscription group, its subscriptions and their prices by hand is
+the part of setup that does not scale — and pricing is the worst of it. There
+is no endpoint that applies one price to every storefront: the documented path
+is one `POST` per territory, roughly **175 writes per subscription**. `products
+apply` reads a file that describes the finished state and makes App Store
+Connect match it.
+
+```json
+{
+  "groups": [{
+    "referenceName": "Pro",
+    "localizations": {
+      "en-US": {"name": "Pro"},
+      "pt-BR": {"name": "Pro"}
+    },
+    "subscriptions": [{
+      "productId": "com.example.pro.annual",
+      "name": "Pro Annual",
+      "subscriptionPeriod": "ONE_YEAR",
+      "groupLevel": 1,
+      "familySharable": false,
+      "reviewNote": "Pro unlocks unlimited logging…",
+      "availability": {"allTerritories": true},
+      "price": {"baseTerritory": "USA", "customerPrice": "24.99"},
+      "localizations": {
+        "en-US": {
+          "name": "Pro Annual",
+          "description": "Unlimited logging, all year."
+        }
+      }
+    }]
+  }]
+}
+```
+
+```bash
+asokit products status                  # what exists in App Store Connect now
+asokit products check products.json     # limits and structure, offline
+asokit products apply products.json     # dry run — every action it would take
+asokit products apply products.json --apply
+```
+
+**It is a diff, not a script.** Each run reads live state first and writes only
+what differs, so a second run against an unchanged file writes nothing —
+including the 175 price rows. That is the property that makes it safe to re-run
+after a partial failure.
+
+Three things it will not do, each on purpose:
+
+- **Change what cannot be changed.** `productId` and `subscriptionPeriod` are
+  fixed at creation. If the file disagrees with a live product, the run stops
+  and tells you, before anything is sent.
+- **Narrow where you sell.** `availability` is all-territory or absent.
+  `allTerritories: false` is rejected rather than obeyed, because the file
+  cannot express a smaller set — restrict territories by hand in App Store
+  Connect instead.
+- **Finish the submission.** Every new subscription lands in
+  `MISSING_METADATA` until it has a review screenshot. Add those in App Store
+  Connect, then submit the subscriptions alongside your next app version.
+
+Text-only changes to products that already exist stay with `products push`,
+which keeps taking the flat `{productId: {locale: {field: value}}}` format.
+
 ---
 
 ## A worked example: budgeting apps in the German App Store
@@ -401,6 +466,11 @@ serves a different audience. That's what the competitor table is for — read it
 | `asokit metadata status` | show which version and locales are editable |
 | `asokit metadata push FILE` | dry-run the sync |
 | `asokit metadata push FILE --apply` | write metadata to App Store Connect |
+| `asokit products status` | list subscriptions, IAPs and their localizations |
+| `asokit products check FILE` | validate product text and structure, offline |
+| `asokit products push FILE` | dry-run a product text sync |
+| `asokit products apply FILE` | dry-run the full provisioning diff |
+| `asokit products apply FILE --apply` | provision groups, subscriptions, prices, availability |
 
 Each research run writes `report.md` plus the raw `scores.json` and
 `expansion.json`, so you can build your own analysis on the data.

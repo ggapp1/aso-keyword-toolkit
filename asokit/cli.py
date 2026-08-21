@@ -9,6 +9,7 @@
   asokit products status               list IAPs/subscriptions and their locales
   asokit products check <file>         validate product text limits
   asokit products push <file> [--apply]  sync product text (dry run unless --apply)
+  asokit products apply <file> [--apply]  provision products, prices, availability
 """
 
 import argparse
@@ -379,16 +380,57 @@ def cmd_metadata_push(args):
         print("\nDRY RUN — nothing written. Re-run with --apply to push.")
 
 
+def _locale_rows(label, localizations):
+    """(label, locale, field, value) for one {locale: {field: value}} map.
+
+    Anything malformed is skipped rather than raised on: `check()` has already
+    collected a problem for it, and a validator that dies with a traceback
+    instead of listing the problems is the one failure mode that helps nobody.
+    """
+    if not isinstance(localizations, dict):
+        return
+    for locale, fields in sorted(localizations.items()):
+        if not isinstance(fields, dict):
+            continue
+        for field, value in fields.items():
+            yield label, locale, field, value
+
+
+def _gauge_rows(data):
+    """(label, locale, field, value) rows for either file format."""
+    if not prod.is_declarative(data):
+        for product_id, localizations in sorted(data.items()):
+            for row in _locale_rows(product_id, localizations):
+                yield row
+        return
+    groups = data.get("groups")
+    for group in groups if isinstance(groups, list) else []:
+        if not isinstance(group, dict):
+            continue
+        label = f"group:{group.get('referenceName')}"
+        for row in _locale_rows(label, group.get("localizations")):
+            yield row
+        subscriptions = group.get("subscriptions")
+        for subscription in subscriptions if isinstance(subscriptions, list) else []:
+            if not isinstance(subscription, dict):
+                continue
+            for row in _locale_rows(
+                subscription.get("productId"), subscription.get("localizations")
+            ):
+                yield row
+
+
 def cmd_products_check(args):
     data = json.loads(Path(args.file).read_text())
     problems = prod.check(data)
-    for product_id, locales in sorted(data.items()):
-        print(f"\n{'=' * 58}\n{product_id}\n{'=' * 58}")
-        for locale, fields in sorted(locales.items()):
-            for field, value in fields.items():
-                limit = prod.LIMITS.get(field)
-                gauge = f"{len(value)}/{limit}" if isinstance(value, str) and limit else "?"
-                print(f"  {locale:<8} {field:<14} ({gauge})  {value}")
+    current = None
+    for label, locale, field, value in _gauge_rows(data):
+        if label != current:
+            print(f"\n{'=' * 58}\n{label}\n{'=' * 58}")
+            current = label
+        limit = prod.LIMITS.get(field)
+        gauge = f"{len(value)}/{limit}" if isinstance(value, str) and limit else "?"
+        print(f"  {locale:<8} {field:<14} ({gauge})  {value}")
     if problems:
         print(f"\n{'!' * 58}\n{len(problems)} problem(s)\n{'!' * 58}")
         for problem in problems:
@@ -445,6 +487,100 @@ def cmd_products_push(args):
         )
     else:
         print("\nDRY RUN — nothing written. Re-run with --apply to push.")
+
+
+def cmd_products_apply(args):
+    config = load_config(args.config) if Path(args.config).exists() else {}
+    app_id = _app_id(args, config)
+    if not app_id:
+        sys.exit("need an appId — pass --app-id or set app.appId in the config")
+
+    data = json.loads(Path(args.file).read_text())
+    if not prod.is_declarative(data):
+        sys.exit(
+            "this file is the flat localization format — use `asokit products push`.\n"
+            "`apply` expects a declarative file with a top-level 'groups' key."
+        )
+    problems = prod.check(data)
+    if problems:
+        print("validation failed — nothing sent:")
+        for problem in problems:
+            print(f"  - {problem}")
+        sys.exit(1)
+
+    # Resolved before the try: a credentials failure is not a half-finished
+    # run, and must not be reported as one.
+    bearer = asc.token()
+    try:
+        actions = asc.apply_products(app_id, data, bearer, apply=args.apply)
+    except asc.ASCError as error:
+        if not args.apply:
+            raise
+        # A write failed and the run stopped there by design — 5xx is not
+        # retried on writes. `apply_products` drops its executed list when the
+        # exception propagates, so this genuinely cannot say which actions
+        # landed. Re-reading live state is the only honest answer.
+        sys.exit(
+            f"{error}\n\n"
+            "The run stopped at that write. Actions before it may already have\n"
+            "been applied, and this cannot tell you which. Re-run without --apply:\n"
+            "the dry run re-reads App Store Connect and shows what is still left."
+        )
+
+    for action in actions:
+        kind = action["kind"]
+        if kind == "skip":
+            print(f"  skip               {action['what']}")
+        elif kind == "setPrices":
+            territories = action.get("territories")
+            if territories is None:
+                print(
+                    f"  prices             {action['productId']} — "
+                    f"{action['baseTerritory']} {action['customerPrice']} "
+                    "(territories resolve after creation)"
+                )
+            elif not territories:
+                print(f"  skip               {action['productId']} prices (unchanged)")
+            else:
+                print(
+                    f"  prices             {action['productId']} — "
+                    f"{len(territories)} territories at "
+                    f"{action['baseTerritory']} {action['customerPrice']}"
+                )
+                if args.verbose:
+                    for territory in territories:
+                        print(f"      {territory}")
+        elif kind in ("createLocalization", "updateLocalization"):
+            operation = "create" if kind == "createLocalization" else "update"
+            print(
+                f"  {operation + ' localization':<18} "
+                f"{action['parentKey']} {action['locale']} "
+                f"({', '.join(sorted(action['fields']))})"
+            )
+        elif kind == "createGroup":
+            print(f"  create group       {action['referenceName']}")
+        elif kind == "createSubscription":
+            print(f"  create             {action['productId']}")
+        elif kind == "patchSubscription":
+            print(
+                f"  patch              {action['productId']} "
+                f"({', '.join(sorted(action['attributes']))})"
+            )
+        elif kind == "setAvailability":
+            # The executor counts the territories it would write; say the
+            # number out loud, because this action puts the product on sale.
+            count = action.get("territoryCount")
+            scope = f" — on sale in {count} territories" if count else ""
+            print(f"  availability       {action['productId']}{scope}")
+
+    if args.apply:
+        print(
+            "\napplied. Subscriptions will sit in MISSING_METADATA until each one has"
+            "\na review screenshot — add those in App Store Connect, then submit them"
+            "\nalongside your next app version."
+        )
+    else:
+        print("\nDRY RUN — nothing written. Re-run with --apply to provision.")
 
 
 def build_parser():
@@ -532,6 +668,17 @@ def build_parser():
     products_push.add_argument("--apply", action="store_true")
     products_push.set_defaults(func=cmd_products_push)
 
+    products_apply = products_sub.add_parser(
+        "apply", help="provision groups, subscriptions, prices (dry run unless --apply)"
+    )
+    products_apply.add_argument("file")
+    products_apply.add_argument("--app-id")
+    products_apply.add_argument("--apply", action="store_true")
+    products_apply.add_argument(
+        "--verbose", action="store_true", help="list every territory instead of a count"
+    )
+    products_apply.set_defaults(func=cmd_products_apply)
+
     return parser
 
 
@@ -539,7 +686,7 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     try:
         args.func(args)
-    except (asc.ASCError, storefronts.UnknownStorefront) as error:
+    except (asc.ASCError, prod.PlanError, storefronts.UnknownStorefront) as error:
         sys.exit(str(error))
     except KeyboardInterrupt:
         sys.exit("\ninterrupted — cached results were kept")

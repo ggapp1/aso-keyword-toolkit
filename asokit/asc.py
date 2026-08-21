@@ -804,9 +804,25 @@ def apply_products(app_id, desired, bearer, apply=False):
             # always every territory; `allTerritories` drives the future-enrol
             # attribute. Read that as "all territories, including ones Apple
             # adds later": false still sells in all 175 today, it just stops
-            # auto-enrolling new ones. Surfaced as territoryCount so a dry run
-            # states the number out loud before anyone approves it.
+            # auto-enrolling new ones — which is why `products.check()` refuses
+            # false outright rather than letting a run expand where a product is
+            # sold. Surfaced as territoryCount so a dry run states the number
+            # out loud before anyone approves it.
             territories = _all_territory_ids(bearer)
+            if not territories:
+                # `_all_territory_ids` deliberately does not cache an empty
+                # result, so this means /v1/territories answered 200 with no
+                # rows. POSTing an empty `availableTerritories` set would be a
+                # delist-everywhere on a live product. Fail instead.
+                raise ASCError(
+                    "App Store Connect returned no territories, so the "
+                    "availability set for "
+                    f"{action['productId']} would be empty — that would take "
+                    "the product off sale everywhere. This action wrote "
+                    "nothing; earlier actions in this run may already have "
+                    "been applied. Re-run the dry run once /v1/territories "
+                    "responds normally to see what is left."
+                )
             action["territoryCount"] = len(territories)
             if apply and subscription_id:
                 call(

@@ -164,6 +164,20 @@ class RequiredProvisioningFields(unittest.TestCase):
             products.check(declarative(availability={"allTerritories": "yes"})),
         )
 
+    def test_rejects_all_territories_false(self):
+        problems = products.check(
+            declarative(availability={"allTerritories": False})
+        )
+        self.assertEqual(len(problems), 1)
+        self.assertIn(
+            "com.example.pro.annual.availability.allTerritories: must be true",
+            problems[0],
+        )
+        # The message must say WHY, because `false` reads as the harmless
+        # "not everywhere" when it actually writes every territory.
+        self.assertIn("every territory", problems[0])
+        self.assertIn("App Store Connect", problems[0])
+
     def test_availability_stays_optional(self):
         data = declarative()
         del data["groups"][0]["subscriptions"][0]["availability"]

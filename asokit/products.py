@@ -132,17 +132,39 @@ def _check_price(prefix, price, problems):
 
 
 def _check_availability(prefix, availability, problems):
-    """Shape-only: the key itself stays optional."""
+    """The key itself stays optional, but `false` is refused.
+
+    `allTerritories: false` does not mean "somewhere smaller". The file has no
+    way to name a territory subset, so the writer sends every territory either
+    way; the flag only decides whether Apple auto-enrols territories it adds in
+    future. So `false` on a subscription currently sold in twelve storefronts
+    would expand it to all of them — a business decision, silently, from a
+    provisioning run. This tool provisions all-territory availability only.
+    """
     if availability is None:
         return
     if not isinstance(availability, dict):
         problems.append(f"{prefix}.availability: expected an object")
         return
     everywhere = availability.get("allTerritories")
-    if everywhere is not None and not isinstance(everywhere, bool):
+    if everywhere is None:
+        return
+    if not isinstance(everywhere, bool):
         problems.append(
             f"{prefix}.availability.allTerritories: expected true or false, "
             f"got {everywhere!r}"
+        )
+        return
+    if not everywhere:
+        problems.append(
+            f"{prefix}.availability.allTerritories: must be true — this tool "
+            "provisions availability in every territory or not at all. It "
+            "cannot express a smaller set, and false would still put the "
+            "product on sale in every territory (it only turns off "
+            "auto-enrolment in territories Apple adds later), so a product "
+            "sold in a few storefronts would be expanded to all of them. "
+            "Remove the availability key and set the territories by hand in "
+            "App Store Connect."
         )
 
 

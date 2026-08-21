@@ -1,7 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
+- `asokit products apply` — declaratively provision subscription groups,
+  subscriptions, prices across every territory, and availability from one file.
+  Idempotent: a re-run against unchanged state writes nothing. Dry run unless
+  `--apply`.
+- `products check` now validates the declarative format alongside the existing
+  flat localization format.
+- `apply` provisions all-territory availability only. `allTerritories: false`
+  is rejected: the file cannot express a smaller set, so `false` would still
+  put the product on sale everywhere — it only turns off auto-enrolment in
+  territories Apple adds later.
+- App Store Connect calls follow pagination and retry rate limits.
+- Review screenshots and submission remain manual by design.
 - **`asokit products`** — validate and sync in-app purchase, subscription, and
   subscription-group localizations (`status` / `check` / `push`, dry run by
   default). File format maps product id → locale → name/description; a
