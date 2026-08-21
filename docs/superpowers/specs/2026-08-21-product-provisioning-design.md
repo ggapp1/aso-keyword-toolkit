@@ -279,9 +279,16 @@ Relationship: `app` (required).
 Relationship: `group` (required, and the only one).
 
 **Pricing** — `GET /v1/subscriptions/{id}/pricePoints?filter[territory]=USA`,
-then `GET /v1/subscriptionPricePoints/{id}/equalizations` for the equivalent
-point in every other territory, then one `POST /v1/subscriptionPrices` per
-territory. There is no bulk endpoint.
+then `GET /v1/subscriptionPricePoints/{id}/equalizations?include=territory` for
+the equivalent point in every other territory, then one
+`POST /v1/subscriptionPrices` per territory. There is no bulk endpoint.
+
+`include=territory` is load-bearing, not decorative. Without it App Store
+Connect returns the equalized rows but omits `relationships.territory.data`, so
+every row is unattributable and only the base territory resolves — pricing the
+product in one storefront and silently leaving the other ~174 unset. This was
+found against the live API on 2026-08-21, after the parameter-free form had
+already been written into the spec and the plan.
 
 Shapes not yet verified and to be confirmed at implementation time:
 `subscriptionAvailabilities`, the `subscriptionPrices` create body's exact

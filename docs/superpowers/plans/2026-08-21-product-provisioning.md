@@ -934,7 +934,15 @@ def _resolve_price_points(bearer, subscription_id, base_territory, customer_pric
             f"Nearby tiers: {', '.join(available[:10])}"
         )
     equalized = call_all(
-        "GET", f"/subscriptionPricePoints/{match['id']}/equalizations?limit=200", bearer
+        "GET",
+        # `include=territory` is REQUIRED, not decorative: without it App Store
+        # Connect returns the equalized rows but omits
+        # `relationships.territory.data`, so every row is skipped and only the
+        # base territory resolves — pricing the product in ONE storefront and
+        # silently leaving ~174 unset. Caught live during Task 5.
+        f"/subscriptionPricePoints/{match['id']}/equalizations"
+        "?include=territory&limit=200",
+        bearer,
     )
     resolved = {base_territory: match["id"]}
     for point in equalized:
