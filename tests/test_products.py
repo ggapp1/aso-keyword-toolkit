@@ -311,6 +311,30 @@ class PlanDrift(unittest.TestCase):
         self.assertEqual(update["fields"]["description"], "All year.")
 
 
+class PriceDiff(unittest.TestCase):
+    def test_empty_current_writes_every_territory(self):
+        desired = {"USA": "pp1", "BRA": "pp2", "PRT": "pp3"}
+        self.assertEqual(products.price_diff({}, desired), ["BRA", "PRT", "USA"])
+
+    def test_identical_maps_write_nothing(self):
+        desired = {"USA": "pp1", "BRA": "pp2"}
+        self.assertEqual(products.price_diff(dict(desired), desired), [])
+
+    def test_writes_only_the_territories_that_differ(self):
+        current = {"USA": "pp1", "BRA": "OLD", "PRT": "pp3"}
+        desired = {"USA": "pp1", "BRA": "pp2", "PRT": "pp3"}
+        self.assertEqual(products.price_diff(current, desired), ["BRA"])
+
+    def test_writes_territories_missing_from_current(self):
+        current = {"USA": "pp1"}
+        desired = {"USA": "pp1", "BRA": "pp2"}
+        self.assertEqual(products.price_diff(current, desired), ["BRA"])
+
+    def test_ignores_territories_present_only_in_current(self):
+        current = {"USA": "pp1", "ATA": "stale"}
+        desired = {"USA": "pp1"}
+        self.assertEqual(products.price_diff(current, desired), [])
+
 
 if __name__ == "__main__":
     unittest.main()

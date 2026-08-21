@@ -408,6 +408,20 @@ def plan(desired, inventory):
     return actions
 
 
+def price_diff(current, desired):
+    """Territories whose price point must be written.
+
+    `current` and `desired` map territory id -> price point id. Territories
+    present only in `current` are left alone: this provisions prices, it does
+    not retract them.
+    """
+    return sorted(
+        territory
+        for territory, point in desired.items()
+        if current.get(territory) != point
+    )
+
+
 def usage(products):
     """Character usage per product per locale, for display."""
     report = {}
