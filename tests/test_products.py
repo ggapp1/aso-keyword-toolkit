@@ -50,5 +50,68 @@ class Usage(unittest.TestCase):
         self.assertEqual(report["com.example.pro"]["en-US"]["name"], (12, 30))
 
 
+def declarative(**overrides):
+    subscription = {
+        "productId": "com.example.pro.annual",
+        "name": "Pro Annual",
+        "subscriptionPeriod": "ONE_YEAR",
+        "groupLevel": 1,
+        "familySharable": False,
+        "price": {"baseTerritory": "USA", "customerPrice": "24.99"},
+        "availability": {"allTerritories": True},
+        "localizations": {"en-US": {"name": "Pro Annual", "description": "All year."}},
+    }
+    subscription.update(overrides)
+    return {
+        "groups": [
+            {
+                "referenceName": "Pro",
+                "localizations": {"en-US": {"name": "Pro"}},
+                "subscriptions": [subscription],
+            }
+        ]
+    }
+
+
+class DeclarativeFormat(unittest.TestCase):
+    def test_detects_declarative_shape(self):
+        self.assertTrue(products.is_declarative(declarative()))
+        self.assertFalse(products.is_declarative({"com.example.pro": {}}))
+
+    def test_valid_file_has_no_problems(self):
+        self.assertEqual(products.check(declarative()), [])
+
+    def test_flags_unknown_period(self):
+        problems = products.check(declarative(subscriptionPeriod="FORTNIGHTLY"))
+        self.assertTrue(any("subscriptionPeriod" in p for p in problems))
+
+    def test_flags_missing_product_id(self):
+        data = declarative()
+        del data["groups"][0]["subscriptions"][0]["productId"]
+        problems = products.check(data)
+        self.assertTrue(any("productId" in p for p in problems))
+
+    def test_flags_non_integer_group_level(self):
+        problems = products.check(declarative(groupLevel="1"))
+        self.assertTrue(any("groupLevel" in p for p in problems))
+
+    def test_flags_non_decimal_price(self):
+        problems = products.check(
+            declarative(price={"baseTerritory": "USA", "customerPrice": "free"})
+        )
+        self.assertTrue(any("customerPrice" in p for p in problems))
+
+    def test_enforces_description_limit_in_declarative_form(self):
+        problems = products.check(
+            declarative(
+                localizations={"en-US": {"name": "Pro", "description": "x" * 46}}
+            )
+        )
+        self.assertTrue(any("46 characters, limit is 45" in p for p in problems))
+
+    def test_flat_format_still_validates(self):
+        self.assertEqual(products.check(entry(name="Pro", description="ok")), [])
+
+
 if __name__ == "__main__":
     unittest.main()
