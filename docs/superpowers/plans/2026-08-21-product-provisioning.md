@@ -412,9 +412,9 @@ class PlanIdempotence(unittest.TestCase):
     def test_fully_provisioned_inventory_writes_nothing(self):
         actions = products.plan(declarative(), provisioned_inventory())
         self.assertEqual(
-            [a for a in actions if a["kind"] != "skip"],
+            [a for a in actions if a["kind"] not in ("skip", "setPrices")],
             [],
-            "a re-run against unchanged state must write nothing",
+            "a re-run against unchanged state must write nothing structural",
         )
 
     def test_existing_group_is_not_recreated(self):
@@ -610,15 +610,9 @@ Note on `setPrices`: it is always emitted when the file declares a price. Whethe
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `python -m unittest tests.test_products -v`
-Expected: PASS. `test_fully_provisioned_inventory_writes_nothing` will still show a `setPrices` action — adjust that assertion to exclude `setPrices` alongside `skip`, since territory-level resolution belongs to Task 3:
+Expected: PASS, all classes.
 
-```python
-        self.assertEqual(
-            [a for a in actions if a["kind"] not in ("skip", "setPrices")],
-            [],
-            "a re-run against unchanged state must write nothing structural",
-        )
-```
+Note on `test_fully_provisioned_inventory_writes_nothing`: it excludes `setPrices` as well as `skip` deliberately. `plan()` always emits the `setPrices` intent when the file declares a price; whether any territory actually needs writing is `price_diff`'s job in Task 3, and that needs the live equalization map. So "structural" is the right scope for this assertion.
 
 - [ ] **Step 5: Commit**
 
@@ -1255,7 +1249,64 @@ def cmd_products_apply(args):
         print("\nDRY RUN — nothing written. Re-run with --apply to provision.")
 ```
 
-- [ ] **Step 2: Wire the parser**
+- [ ] **Step 2: Teach `products check` to print the declarative format**
+
+`cmd_products_check` currently does `sorted(data.items())` and then treats each
+value as a `{locale: fields}` map. Handed a declarative file it iterates
+`("groups", [...])` and dies with
+`AttributeError: 'list' object has no attribute 'items'` — before printing
+anything. `prod.check()` itself is already format-aware after Task 1; only the
+printer is not. Replace the printing loop in `cmd_products_check` so it walks
+either shape:
+
+```python
+def _gauge_rows(data):
+    """(label, locale, field, value) rows for either file format."""
+    if not prod.is_declarative(data):
+        for product_id, locales in sorted(data.items()):
+            for locale, fields in sorted(locales.items()):
+                for field, value in fields.items():
+                    yield product_id, locale, field, value
+        return
+    for group in data.get("groups", []):
+        label = f"group:{group.get('referenceName')}"
+        for locale, fields in sorted(group.get("localizations", {}).items()):
+            for field, value in fields.items():
+                yield label, locale, field, value
+        for subscription in group.get("subscriptions", []):
+            product_id = subscription.get("productId")
+            for locale, fields in sorted(subscription.get("localizations", {}).items()):
+                for field, value in fields.items():
+                    yield product_id, locale, field, value
+
+
+def cmd_products_check(args):
+    data = json.loads(Path(args.file).read_text())
+    problems = prod.check(data)
+    current = None
+    for label, locale, field, value in _gauge_rows(data):
+        if label != current:
+            print(f"\n{'=' * 58}\n{label}\n{'=' * 58}")
+            current = label
+        limit = prod.LIMITS.get(field)
+        gauge = f"{len(value)}/{limit}" if isinstance(value, str) and limit else "?"
+        print(f"  {locale:<8} {field:<14} ({gauge})  {value}")
+    if problems:
+        print(f"\n{'!' * 58}\n{len(problems)} problem(s)\n{'!' * 58}")
+        for problem in problems:
+            print(f"  - {problem}")
+        sys.exit(1)
+    print("\nAll fields within limits.")
+```
+
+Verify both formats still print:
+
+```bash
+python -m asokit products check <a flat file>        # unchanged output shape
+python -m asokit products check <a declarative file> # group + per-subscription sections
+```
+
+- [ ] **Step 3: Wire the parser**
 
 In `build_parser`, after the `products_push` block:
 
@@ -1272,7 +1323,7 @@ In `build_parser`, after the `products_push` block:
     products_apply.set_defaults(func=cmd_products_apply)
 ```
 
-- [ ] **Step 3: Update the module docstring**
+- [ ] **Step 4: Update the module docstring**
 
 Add one line to the `asokit/cli.py` docstring, after the `products push` line:
 
@@ -1280,14 +1331,14 @@ Add one line to the `asokit/cli.py` docstring, after the `products push` line:
   asokit products apply <file> [--apply]  provision products, prices, availability
 ```
 
-- [ ] **Step 4: Verify the command runs and dry-runs safely**
+- [ ] **Step 5: Verify the command runs and dry-runs safely**
 
 ```bash
 python -m asokit products apply --help
 ```
 Expected: help text listing `--app-id`, `--apply`, `--verbose`.
 
-- [ ] **Step 5: Update README, CHANGELOG and version**
+- [ ] **Step 6: Update README, CHANGELOG and version**
 
 In `README.md`, in the App Store Connect section, add a subsection documenting the declarative format (copy the JSON block from the spec's "File format" section verbatim) and the three commands, stating that `apply` is a dry run without `--apply` and that review screenshots remain manual.
 
@@ -1308,12 +1359,12 @@ In `CHANGELOG.md`, add at the top:
 
 In `pyproject.toml`, bump `version = "0.2.0"` to `version = "0.3.0"`.
 
-- [ ] **Step 6: Run the full suite**
+- [ ] **Step 7: Run the full suite**
 
 Run: `python -m unittest discover -s tests -t . -v`
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add asokit/cli.py README.md CHANGELOG.md pyproject.toml
