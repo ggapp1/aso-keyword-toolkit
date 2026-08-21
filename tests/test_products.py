@@ -112,6 +112,66 @@ class DeclarativeFormat(unittest.TestCase):
     def test_flat_format_still_validates(self):
         self.assertEqual(products.check(entry(name="Pro", description="ok")), [])
 
+    def test_flat_format_still_allows_an_empty_locale_map(self):
+        self.assertEqual(products.check({"com.example.pro": {}}), [])
+
+
+class RequiredProvisioningFields(unittest.TestCase):
+    def test_requires_subscription_localizations(self):
+        data = declarative()
+        del data["groups"][0]["subscriptions"][0]["localizations"]
+        self.assertIn(
+            "com.example.pro.annual.localizations: at least one locale is "
+            "required — App Store Connect rejects a subscription created "
+            "without one",
+            products.check(data),
+        )
+
+    def test_flags_empty_subscription_localizations(self):
+        self.assertIn(
+            "com.example.pro.annual.localizations: at least one locale is "
+            "required — App Store Connect rejects a subscription created "
+            "without one",
+            products.check(declarative(localizations={})),
+        )
+
+    def test_requires_group_localizations(self):
+        data = declarative()
+        del data["groups"][0]["localizations"]
+        self.assertIn(
+            "group:Pro.localizations: at least one locale is required — App "
+            "Store Connect rejects a subscription group created without one",
+            products.check(data),
+        )
+
+    def test_requires_price(self):
+        data = declarative()
+        del data["groups"][0]["subscriptions"][0]["price"]
+        self.assertIn(
+            "com.example.pro.annual.price: required — App Store Connect "
+            "cannot create a subscription without a price",
+            products.check(data),
+        )
+
+    def test_flags_malformed_availability(self):
+        self.assertIn(
+            "com.example.pro.annual.availability: expected an object",
+            products.check(declarative(availability="worldwide")),
+        )
+        self.assertIn(
+            "com.example.pro.annual.availability.allTerritories: expected "
+            "true or false, got 'yes'",
+            products.check(declarative(availability={"allTerritories": "yes"})),
+        )
+
+    def test_availability_stays_optional(self):
+        data = declarative()
+        del data["groups"][0]["subscriptions"][0]["availability"]
+        self.assertEqual(products.check(data), [])
+
+    def test_sample_file_is_clean_under_the_stricter_rules(self):
+        self.assertEqual(products.check(declarative()), [])
+
 
 if __name__ == "__main__":
     unittest.main()

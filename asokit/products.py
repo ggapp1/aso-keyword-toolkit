@@ -43,7 +43,6 @@ PERIODS = frozenset(
     {"ONE_WEEK", "ONE_MONTH", "TWO_MONTHS", "THREE_MONTHS", "SIX_MONTHS", "ONE_YEAR"}
 )
 
-SUBSCRIPTION_LOCALIZATION_FIELDS = PRODUCT_FIELDS
 REVIEW_NOTE_LIMIT = 4000
 
 
@@ -112,6 +111,10 @@ def _is_decimal(value):
 
 def _check_price(prefix, price, problems):
     if price is None:
+        problems.append(
+            f"{prefix}.price: required — App Store Connect cannot create a "
+            "subscription without a price"
+        )
         return
     if not isinstance(price, dict):
         problems.append(f"{prefix}.price: expected an object")
@@ -123,6 +126,32 @@ def _check_price(prefix, price, problems):
             f"{prefix}.price.customerPrice: expected a decimal string like '24.99', "
             f"got {price.get('customerPrice')!r}"
         )
+
+
+def _check_availability(prefix, availability, problems):
+    """Shape-only: the key itself stays optional."""
+    if availability is None:
+        return
+    if not isinstance(availability, dict):
+        problems.append(f"{prefix}.availability: expected an object")
+        return
+    everywhere = availability.get("allTerritories")
+    if everywhere is not None and not isinstance(everywhere, bool):
+        problems.append(
+            f"{prefix}.availability.allTerritories: expected true or false, "
+            f"got {everywhere!r}"
+        )
+
+
+def _check_required_localizations(prefix, locales, known, subject, problems):
+    """Like `_check_localizations`, but at least one locale must be present."""
+    if locales is None or (isinstance(locales, dict) and not locales):
+        problems.append(
+            f"{prefix}.localizations: at least one locale is required — App "
+            f"Store Connect rejects {subject} created without one"
+        )
+        return
+    _check_localizations(prefix, locales, known, problems)
 
 
 def _check_subscription(prefix, subscription, problems):
@@ -167,8 +196,13 @@ def _check_subscription(prefix, subscription, problems):
                 f"limit is {REVIEW_NOTE_LIMIT}"
             )
     _check_price(prefix, subscription.get("price"), problems)
-    _check_localizations(
-        prefix, subscription.get("localizations", {}), PRODUCT_FIELDS, problems
+    _check_availability(prefix, subscription.get("availability"), problems)
+    _check_required_localizations(
+        prefix,
+        subscription.get("localizations"),
+        PRODUCT_FIELDS,
+        "a subscription",
+        problems,
     )
 
 
@@ -187,8 +221,12 @@ def _check_declarative(data):
         )
         if not isinstance(reference, str) or not reference:
             problems.append(f"groups[{index}].referenceName: required, non-empty text")
-        _check_localizations(
-            f"group:{label}", group.get("localizations", {}), GROUP_FIELDS, problems
+        _check_required_localizations(
+            f"group:{label}",
+            group.get("localizations"),
+            GROUP_FIELDS,
+            "a subscription group",
+            problems,
         )
         subscriptions = group.get("subscriptions")
         if not isinstance(subscriptions, list) or not subscriptions:
