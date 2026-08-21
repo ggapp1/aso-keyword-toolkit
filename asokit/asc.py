@@ -814,14 +814,18 @@ def apply_products(app_id, desired, bearer, apply=False):
                 # result, so this means /v1/territories answered 200 with no
                 # rows. POSTing an empty `availableTerritories` set would be a
                 # delist-everywhere on a live product. Fail instead.
+                #
+                # This guard is reached on a dry run too, where nothing has
+                # been written and nothing will be. So the message names only
+                # the problem and what it would cost — recovery advice belongs
+                # to the caller, which is the only side that knows whether any
+                # write was attempted.
                 raise ASCError(
                     "App Store Connect returned no territories, so the "
                     "availability set for "
-                    f"{action['productId']} would be empty — that would take "
-                    "the product off sale everywhere. This action wrote "
-                    "nothing; earlier actions in this run may already have "
-                    "been applied. Re-run the dry run once /v1/territories "
-                    "responds normally to see what is left."
+                    f"{action['productId']} would be empty — which sells it in "
+                    "no storefront at all, and on a product already on sale "
+                    "would delist it everywhere."
                 )
             action["territoryCount"] = len(territories)
             if apply and subscription_id:
