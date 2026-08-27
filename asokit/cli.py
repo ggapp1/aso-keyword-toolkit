@@ -313,7 +313,7 @@ def cmd_research(args):
 
 def cmd_metadata_check(args):
     data = json.loads(Path(args.file).read_text())
-    problems = meta.check(data)
+    problems = meta.check(data, strict=args.strict, allow_partial=args.allow_partial)
     for locale, fields in sorted(data.items()):
         print(f"\n{'=' * 58}\n{locale}\n{'=' * 58}")
         for field in ("name", "subtitle", "keywords", "promotionalText", "description"):
@@ -326,8 +326,27 @@ def cmd_metadata_check(args):
         print(f"\n{'!' * 58}\n{len(problems)} problem(s)\n{'!' * 58}")
         for problem in problems:
             print(f"  - {problem}")
+        _print_stemming_note(data)
         sys.exit(1)
     print("\nAll fields within limits. No repetition across name, subtitle and keywords.")
+    _print_stemming_note(data)
+
+
+def _print_stemming_note(data):
+    """Say where the duplication check could only compare exact words.
+
+    Apple matches on stems, but morphology is per-language and we only have
+    rules for some. Staying quiet would let a clean run read as a verdict on
+    locales we never really checked.
+    """
+    unstemmed = meta.unstemmed_locales(data)
+    if not unstemmed:
+        return
+    shown = ", ".join(unstemmed[:8]) + (f" +{len(unstemmed) - 8} more" if len(unstemmed) > 8 else "")
+    print(
+        f"\nnote: no stemming rules for {shown} — those locales were compared as exact "
+        "words only, so repetition between a stem and its inflected form is not reported."
+    )
 
 
 def _app_id(args, config):
@@ -361,7 +380,7 @@ def cmd_metadata_push(args):
         sys.exit("need an appId — pass --app-id or set app.appId in the config")
 
     data = json.loads(Path(args.file).read_text())
-    problems = meta.check(data)
+    problems = meta.check(data, allow_partial=args.allow_partial)
     if problems:
         print("validation failed — nothing sent:")
         for problem in problems:
@@ -632,6 +651,14 @@ def build_parser():
 
     check = metadata_sub.add_parser("check", help="validate limits and duplication")
     check.add_argument("file")
+    check.add_argument(
+        "--strict", action="store_true", help="also require release notes on every locale"
+    )
+    check.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="skip submission-completeness rules, for updating a subset of fields",
+    )
     check.set_defaults(func=cmd_metadata_check)
 
     status = metadata_sub.add_parser("status", help="what App Store Connect will accept")
@@ -642,6 +669,11 @@ def build_parser():
     push.add_argument("file")
     push.add_argument("--app-id")
     push.add_argument("--apply", action="store_true")
+    push.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="push locales whose description is already live and absent from the file",
+    )
     push.set_defaults(func=cmd_metadata_push)
 
     products_command = subcommands.add_parser(
