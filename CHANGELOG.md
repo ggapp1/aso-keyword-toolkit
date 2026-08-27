@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.4.0
+
+Everything here comes from a field report on taking a live app from 9 App
+Store locales to 37 in one sitting ([#1]).
+
+- **`asokit metadata suggest`** — the step that was missing between the
+  research report and `metadata check`: packing scored candidates into a
+  100-character keyword field. Splits phrases into words because Apple
+  combines across fields, drops stopwords and terms the name or subtitle
+  already cover, and filters competitor brand fragments that `looksLikeAppName`
+  cannot catch once phrases are split into words. Tokenizing splits on
+  separators rather than matching `\w`, which excludes nonspacing combining
+  marks and shreds Thai and Devanagari; scripts written without spaces stay one
+  token by design. Live keywords rejoin the pool at the lowest priority so a
+  term that is already ranking is not discarded for want of an autocomplete
+  suggestion. `--block` is the escape hatch for junk no rule reaches.
+- **`asokit metadata pull`** — writes the live listing in the same
+  `{locale: {field: value}}` shape `check` and `push` consume, so
+  `push baseline.json` is the rollback path. Previously everyone hand-rolled
+  this, and without it a bad push has no undo.
+- **Stemming is per-language.** `stem()` applied the English suffixes to every
+  locale, truncating German `zucker` to `zuck` and `wasser` to `wass` —
+  inventing collisions between unrelated words while still missing the real
+  German plurals. Suffix rules are now keyed by language subtag, Romance `-es`
+  and Portuguese `-ões/-ão` included. Locales with no rules fall back to exact
+  matching and `metadata check` names them, rather than presenting an English
+  verdict on Greek.
+- **`metadata check` catches the error that blocks submission.** A locale
+  carrying name/subtitle/keywords with an empty or absent description passed
+  validation. App Store Connect does not fall back to the primary locale for
+  unfilled fields — it stores them empty, and an empty description makes the
+  version unsubmittable. `--allow-partial` skips the rule when you are
+  deliberately updating a subset of fields; `--strict` also wants release notes.
+- **`metadata push` reports what it actually did.** It reported the
+  create-vs-update predicted by a snapshot taken before the run, so a create
+  that became an adopt-and-patch mid-run was still reported as created. Each
+  locale is now streamed as it lands, flushed so a redirected log is a live
+  record, and an abort says which locales were already written instead of
+  leaving the account half-updated with no report.
+- **`asokit doctor` checks territory availability.** Researching a storefront
+  the app is not sold in is pure waste; assuming the opposite drops markets you
+  already sell in. Advisory, not a failure.
+- `research --all --resume` skips markets that already have scores, so a
+  failure at market 30 of 37 no longer loses the loop.
+- `research --out` with `--all` is read as the parent of the per-market
+  directories instead of being rejected.
+- Progress lines flush, so a long run redirected to a log is no longer silent
+  until it exits.
+- `push` and `status` follow pagination when reading existing localizations.
+
+[#1]: https://github.com/ggapp1/aso-keyword-toolkit/issues/1
+
 ## 0.3.0
 
 - `asokit products apply` — declaratively provision subscription groups,

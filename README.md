@@ -279,9 +279,30 @@ It catches what actually goes wrong:
 - a word duplicated between name and subtitle
 - the same keyword listed twice
 - `a, b, c` spacing in the keyword field, which silently costs you characters
+- **a localization with no description**, which blocks submission outright
+
+That last one is the trap in a research-driven workflow: you localize name,
+subtitle and keywords from research data and leave the long-form copy alone.
+App Store Connect does *not* fall back to your primary locale for the fields
+you skip — it stores them empty, and an empty description means the version
+cannot be submitted. Nothing surfaces that until submission fails. Use
+`--allow-partial` when you are deliberately updating a subset of fields on a
+locale whose description is already live, and `--strict` to also require
+release notes.
 
 This command needs no credentials, so it doubles as clean copy-paste output if
 you'd rather paste into the web UI.
+
+**Stemming is per-language.** Apple matches on stems, but morphology is not
+universal, and English suffix rules applied everywhere are worse than no
+stemming at all: they truncate German `Zucker` to `zuck` and `Wasser` to
+`wass`, inventing collisions between unrelated words while still missing the
+real German plurals, which are formed in `-en` and with umlaut. Rules exist
+for English, Spanish, Portuguese, Catalan, Galician, French and Dutch, plus
+the languages that mark no plural suffix at all (Japanese, Korean, Chinese,
+Thai, Vietnamese, Indonesian, Malay). Every other locale is compared as exact
+words, and `metadata check` prints a note naming them rather than letting a
+clean run read as a verdict on locales it never really checked.
 
 ### Metadata rules worth knowing
 
@@ -297,6 +318,61 @@ you'd rather paste into the web UI.
 - Compound-word languages (German, Dutch, Finnish) can't have compounds
   assembled from parts across fields, so each compound must appear whole.
   Budget for it: `Haushaltsbuch` costs 13 of your 30 subtitle characters.
+
+---
+
+## Drafting the keyword field
+
+Between a research report and a validated metadata file sits the step that is
+actually hard: packing terms into 100 characters without wasting budget.
+
+```bash
+asokit metadata pull > baseline.json          # capture what is live first
+asokit metadata suggest --market de --baseline baseline.json
+```
+
+```
+de -> de-DE  (38/100 characters)
+  blutzucker,wasser,tracker,fodmap,hba1c
+  dropped: competitor app-name fragments (balloon, uab, zuckerheld); stopwords (app, der, und)
+```
+
+It shows its work rather than presenting a field as magic. What it handles:
+
+- **Phrases become words.** Apple combines words across fields, so listing
+  `stool tracker` and `poop tracker` buys `tracker` twice.
+- **Stopwords.** `with`, `and`, `free` eat characters and target nothing.
+- **Competitor brand fragments.** `looksLikeAppName` filters whole terms, but
+  splitting phrases into words leaks `balloon`, `uab` and `inc` out of rival
+  app names — which is where trademark trouble starts.
+- **Scripts with combining marks.** Tokenizing splits on separators rather
+  than matching `\w`, because Python's `\w` excludes nonspacing marks and
+  shreds Thai and Devanagari at every tone mark and matra. Scripts written
+  without spaces deliberately stay one token; segmenting them properly needs a
+  dictionary this tool does not have.
+- **Terms you already rank for.** Live keywords from `--baseline` rejoin the
+  pool at the lowest priority, so a hand-picked term that is already working
+  is not discarded just because autocomplete never proposed it.
+
+`--block word,word` is the escape hatch for junk no rule reaches — a beverage
+brand surfacing in health autocomplete is neither off-category by Apple's
+genre data nor an app name, but it is still not a keyword you want.
+
+Draft every market at once and validate the result:
+
+```bash
+asokit metadata suggest --all --baseline baseline.json --json --out draft.json
+asokit metadata check draft.json
+asokit metadata push draft.json          # dry run first
+```
+
+With `--baseline`, the draft carries the rest of each localization through
+unchanged and swaps only the keyword field, so what comes out is a complete,
+pushable file rather than a fragment. Without one you get keywords alone, which
+`check` will flag as unsubmittable — correctly, since a locale carrying
+keywords and no description is exactly the shape that cannot be submitted.
+
+The output is a starting point, not an answer. Read it before you push it.
 
 ---
 
@@ -318,13 +394,32 @@ export ASC_PRIVATE_KEY_PATH=~/.appstoreconnect/AuthKey_XXXXXXXXXX.p8
 
 ```bash
 asokit metadata status                  # is a version editable right now?
+asokit metadata pull > baseline.json    # capture the current listing FIRST
 asokit metadata push de.json            # dry run — shows exactly what would change
 asokit metadata push de.json --apply    # write it
 ```
 
+**Pull before you push.** `metadata pull` emits the same
+`{locale: {field: value}}` shape that `check` and `push` consume, so
+`push baseline.json` is your undo. It is the cheapest safety step available
+and the only rollback path there is.
+
 Validation runs before anything is sent, so a bad file fails locally rather
 than halfway through a batch. Credentials are read from the environment only;
 `.p8` keys are gitignored by default.
+
+A multi-locale push is re-runnable. Creating an `appInfoLocalization` makes
+App Store Connect auto-create the paired `appStoreVersionLocalization`, so the
+follow-up create collides with a resource that now exists; `push` adopts it
+and patches instead of aborting, and reports `adopted` rather than claiming it
+created something. Each locale is printed as it lands, flushed, so a redirected
+log is a live record — and if a run does fail partway, the output tells you
+exactly which locales were already written. Re-running converges.
+
+`asokit doctor` also checks that your app is actually on sale in every market
+you configured. Researching a storefront nobody can buy in is an hour of
+wasted scoring, and assuming the opposite quietly drops markets you already
+sell in.
 
 ### Subscriptions from one declarative file
 
@@ -464,7 +559,11 @@ serves a different audience. That's what the competitor table is for — read it
 | `asokit storefronts --check de` | verify one storefront against the live endpoint |
 | `asokit research --market de` | expand and score keywords for one market |
 | `asokit research --all` | run every market in your config |
-| `asokit metadata check FILE` | validate limits and duplication |
+| `asokit research --all --resume` | continue an interrupted run, skipping scored markets |
+| `asokit metadata suggest --market de` | pack researched candidates into a keyword field |
+| `asokit metadata suggest --all --json` | draft every market's keyword field at once |
+| `asokit metadata pull` | write the live listing to JSON — your rollback baseline |
+| `asokit metadata check FILE` | validate limits, duplication and submission-readiness |
 | `asokit metadata status` | show which version and locales are editable |
 | `asokit metadata push FILE` | dry-run the sync |
 | `asokit metadata push FILE --apply` | write metadata to App Store Connect |

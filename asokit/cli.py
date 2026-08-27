@@ -556,7 +556,12 @@ def cmd_metadata_suggest(args):
         field = packing.select_keywords(
             candidates, name, subtitle, limit=args.limit, blocked=blocked, locale=locale
         )
-        drafted[locale] = {"keywords": field}
+        # With a baseline, emit the whole localization with only the keyword
+        # field swapped, so the draft is something `check` passes and `push`
+        # can send. A keywords-only fragment would trip the submission rule on
+        # every locale, since a file carrying keywords and no description is
+        # exactly the unsubmittable shape that rule exists to catch.
+        drafted[locale] = {**live, "keywords": field}
 
         if not args.json:
             print(f"\n{market} -> {locale}  ({len(field)}/{args.limit} characters)")
@@ -575,7 +580,8 @@ def cmd_metadata_suggest(args):
         rendered = json.dumps(drafted, indent=2, ensure_ascii=False)
         if args.out:
             Path(args.out).write_text(rendered + "\n")
-            print(f"{args.out} — {len(drafted)} locale(s)", file=sys.stderr)
+            note = "" if baseline else " (keywords only — no --baseline given)"
+            print(f"{args.out} — {len(drafted)} locale(s){note}", file=sys.stderr)
         else:
             print(rendered)
     else:

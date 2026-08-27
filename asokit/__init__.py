@@ -5,4 +5,4 @@ the App Store autocomplete (search hints) API and the iTunes Search API.
 Metadata sync uses the App Store Connect API with your own key.
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
