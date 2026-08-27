@@ -178,6 +178,48 @@ class PartialFailureIsReported(unittest.TestCase):
         self.assertEqual({action["locale"] for action in seen}, {"de-DE"})
 
 
+class AvailableTerritories(unittest.TestCase):
+    """Researching a storefront the app is not sold in is an hour of waste."""
+
+    class Availability:
+        def __init__(self, rows, record=True):
+            self.rows = rows
+            self.record = record
+
+        def call(self, method, path, bearer, body=None):
+            if path.endswith("/appAvailabilityV2"):
+                return {"data": {"id": "avail1"}} if self.record else {"data": None}
+            if "/territoryAvailabilities" in path:
+                assert "include=territory" in path, "territory ids come back as links without it"
+                return {"data": self.rows}
+            raise AssertionError(f"unexpected GET {path}")
+
+    @staticmethod
+    def row(code, available):
+        return {
+            "id": f"{code}-row",
+            "attributes": {"available": available},
+            "relationships": {"territory": {"data": {"type": "territories", "id": code}}},
+        }
+
+    def test_reports_only_territories_on_sale(self):
+        install(self, self.Availability([self.row("USA", True), self.row("RUS", False)]))
+
+        self.assertEqual(asc.available_territories("123", "token"), {"USA"})
+
+    def test_no_availability_record_is_none_not_empty(self):
+        """`None` means unreadable; an empty set would claim sold nowhere."""
+        install(self, self.Availability([], record=False))
+
+        self.assertIsNone(asc.available_territories("123", "token"))
+
+    def test_rows_without_an_identifiable_territory_are_skipped(self):
+        rows = [self.row("USA", True), {"id": "x", "attributes": {"available": True}}]
+        install(self, self.Availability(rows))
+
+        self.assertEqual(asc.available_territories("123", "token"), {"USA"})
+
+
 class Pull(unittest.TestCase):
     def test_emits_the_shape_check_and_push_consume(self):
         install(self, FakeConnect(info_locales=["de-DE"], version_locales=["de-DE"]))

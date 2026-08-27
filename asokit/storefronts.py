@@ -99,3 +99,27 @@ def name(country):
 def default_locale(country):
     """Best-guess App Store Connect locale. Override per market in config."""
     return STOREFRONTS[country.lower()][2]
+
+# Storefront country code -> App Store Connect territory id. Connect identifies
+# territories by ISO 3166-1 alpha-3 while the storefront table above is keyed by
+# alpha-2, so anything comparing a configured market against availability data
+# has to cross this bridge.
+TERRITORIES = {
+    "ae": "ARE", "ar": "ARG", "at": "AUT", "au": "AUS", "be": "BEL",
+    "bg": "BGR", "br": "BRA", "ca": "CAN", "ch": "CHE", "cl": "CHL",
+    "cn": "CHN", "co": "COL", "cz": "CZE", "de": "DEU", "dk": "DNK",
+    "ee": "EST", "eg": "EGY", "es": "ESP", "fi": "FIN", "fr": "FRA",
+    "gb": "GBR", "gr": "GRC", "hk": "HKG", "hr": "HRV", "hu": "HUN",
+    "id": "IDN", "ie": "IRL", "il": "ISR", "in": "IND", "is": "ISL",
+    "it": "ITA", "jp": "JPN", "kr": "KOR", "lt": "LTU", "lu": "LUX",
+    "lv": "LVA", "mx": "MEX", "my": "MYS", "nl": "NLD", "no": "NOR",
+    "nz": "NZL", "pe": "PER", "ph": "PHL", "pl": "POL", "pt": "PRT",
+    "ro": "ROU", "ru": "RUS", "sa": "SAU", "se": "SWE", "sg": "SGP",
+    "si": "SVN", "sk": "SVK", "th": "THA", "tr": "TUR", "tw": "TWN",
+    "ua": "UKR", "us": "USA", "ve": "VEN", "vn": "VNM", "za": "ZAF",
+}
+
+
+def territory(country):
+    """App Store Connect territory id for a storefront code, or None."""
+    return TERRITORIES.get(country.lower())

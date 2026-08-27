@@ -498,6 +498,38 @@ def _subscription_availability(bearer, subscription_id):
     return {"allTerritories": everywhere}
 
 
+def available_territories(app_id, bearer):
+    """Territory ids the app is actually on sale in.
+
+    Researching a storefront the app is not sold in is pure waste — an hour of
+    scoring for a market nobody can buy in — and the answer is one call away
+    from credentials `doctor` already holds.
+
+    Returns None when App Store Connect has no availability record to read,
+    which is different from "available nowhere" and must not be reported as it.
+    """
+    response = call("GET", f"/apps/{app_id}/appAvailabilityV2", bearer)
+    data = response.get("data")
+    if not data:
+        return None
+    rows = call_all(
+        "GET",
+        f"{API_V2}/appAvailabilities/{data['id']}/territoryAvailabilities"
+        # `include=territory` is load-bearing here too: without it the territory
+        # relationship comes back as links only and every row is unidentifiable.
+        "?include=territory&limit=200",
+        bearer,
+    )
+    available = set()
+    for row in rows:
+        if not (row.get("attributes") or {}).get("available"):
+            continue
+        territory = ((row.get("relationships") or {}).get("territory") or {}).get("data") or {}
+        if territory.get("id"):
+            available.add(territory["id"])
+    return available
+
+
 def products_status(app_id, bearer):
     """Every product and the localizations each already has.
 

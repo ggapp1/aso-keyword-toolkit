@@ -202,7 +202,60 @@ def cmd_doctor(args):
     else:
         print("connect     not configured (only needed to push metadata)")
 
+    if all(creds):
+        _report_territories(config_path, args)
+
     print("\nready" if ok else "\nsome checks failed — see above")
+
+
+def _report_territories(config_path, args):
+    """Say which configured markets the app is not actually sold in.
+
+    Only called when App Store Connect credentials are configured — without
+    them there is nothing to ask, and a failure line would just be noise.
+
+    An hour of scoring for a storefront nobody can buy in is pure waste, and
+    the reverse mistake is worse: dropping a market on the assumption the app
+    is not sold there when it is. Advisory, not a failure — researching ahead
+    of a launch is legitimate.
+    """
+    if not config_path.exists():
+        return
+    try:
+        config = json.loads(config_path.read_text())
+    except json.JSONDecodeError:
+        return
+    app_id = args.app_id or config.get("app", {}).get("appId")
+    markets = config.get("markets", {})
+    if not app_id or not markets:
+        return
+
+    try:
+        available = asc.available_territories(app_id, asc.token())
+    except Exception as error:  # noqa: BLE001 - diagnostics should never crash
+        print(f"territories could not be read — {error}".split("\n")[0])
+        return
+    if available is None:
+        print("territories no availability record on this app yet")
+        return
+
+    print(f"territories on sale in {len(available)} territory(ies)")
+    unknown, unavailable = [], []
+    for market in sorted(markets):
+        code = storefronts.TERRITORIES.get(market.lower())
+        if not code:
+            unknown.append(market)
+        elif code not in available:
+            unavailable.append(market)
+    if unavailable:
+        print(
+            f"            NOT on sale in: {', '.join(unavailable)} — "
+            "researching those storefronts scores keywords nobody can act on"
+        )
+    if unknown:
+        print(f"            no territory mapping for: {', '.join(unknown)}")
+    if not unavailable and not unknown:
+        print(f"            all {len(markets)} configured market(s) are on sale")
     sys.exit(0 if ok else 1)
 
 
@@ -786,6 +839,7 @@ def build_parser():
     initialize.set_defaults(func=cmd_init)
 
     doctor = subcommands.add_parser("doctor", help="check config, connectivity, credentials")
+    doctor.add_argument("--app-id", help="override the configured appId for the territory check")
     doctor.set_defaults(func=cmd_doctor)
 
     storefront = subcommands.add_parser("storefronts", help="list or verify storefronts")

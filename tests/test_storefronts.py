@@ -40,5 +40,26 @@ class Table(unittest.TestCase):
             self.assertTrue(storefronts.default_locale(code))
 
 
+class Territories(unittest.TestCase):
+    """Connect keys territories by alpha-3; the storefront table is alpha-2."""
+
+    def test_every_storefront_maps_to_a_territory(self):
+        unmapped = sorted(set(storefronts.STOREFRONTS) - set(storefronts.TERRITORIES))
+        self.assertEqual(unmapped, [])
+
+    def test_no_territory_without_a_storefront(self):
+        orphaned = sorted(set(storefronts.TERRITORIES) - set(storefronts.STOREFRONTS))
+        self.assertEqual(orphaned, [])
+
+    def test_territory_ids_are_distinct_alpha_3_codes(self):
+        codes = list(storefronts.TERRITORIES.values())
+        self.assertEqual(len(codes), len(set(codes)))
+        self.assertTrue(all(len(code) == 3 and code.isupper() for code in codes))
+
+    def test_lookup_is_case_insensitive_and_returns_none_when_unknown(self):
+        self.assertEqual(storefronts.territory("DE"), "DEU")
+        self.assertIsNone(storefronts.territory("zz"))
+
+
 if __name__ == "__main__":
     unittest.main()
