@@ -641,12 +641,25 @@ python3 -m unittest discover -s tests -t .
 
 The codebase is small and deliberately boring: `storefronts` (the country
 table), `sources` (HTTP and caching), `research` (expansion and scoring),
-`metadata` (pure validation, no I/O), `asc` (App Store Connect), `report`
-(rendering), `suggest` (seed derivation).
+`metadata` (pure validation, no I/O), `packing` (keyword-field selection, also
+pure), `asc` (App Store Connect), `report` (rendering), `suggest` (seed
+derivation).
 
-Contributions welcome — especially additional storefront verifications,
-stopwords for languages not yet covered, and app-name punctuation conventions
-from stores you know better than I do.
+Contributions welcome, and two tables in particular are built to be extended
+by people who know a language better than I do:
+
+- **`metadata._RULES`** — stemming suffixes per language. Locales absent from
+  it are compared as exact words, which under-reports repetition but never
+  invents it. Adding a language is a few `(suffix, replacement)` pairs; the
+  bar is that the rule must not truncate ordinary stems, which is what the
+  old English-everywhere behaviour did to German.
+- **`packing._LANGUAGE_FILLER`** — stopwords per language, applied only to
+  Latin-script words. Under-filtering wastes a few characters; over-filtering
+  deletes the keyword you were trying to rank for, so err toward leaving words
+  in.
+
+Storefront verifications and app-name punctuation conventions from stores you
+know better than I do are just as welcome.
 
 ## License
 
