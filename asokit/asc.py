@@ -208,11 +208,13 @@ def status(app_id, bearer):
             "state": version["attributes"]["appStoreState"],
             "id": version["id"],
         }
-        localizations = call(
-            "GET", f"/appStoreVersions/{version['id']}/appStoreVersionLocalizations", bearer
+        localizations = call_all(
+            "GET",
+            f"/appStoreVersions/{version['id']}/appStoreVersionLocalizations?limit=200",
+            bearer,
         )
         report["versionLocales"] = sorted(
-            item["attributes"]["locale"] for item in localizations["data"]
+            item["attributes"]["locale"] for item in localizations
         )
     else:
         recent = call("GET", f"/apps/{app_id}/appStoreVersions?limit=3", bearer)
@@ -223,8 +225,10 @@ def status(app_id, bearer):
 
     infos = call("GET", f"/apps/{app_id}/appInfos", bearer)
     info = _editable_info(infos)
-    localizations = call("GET", f"/appInfos/{info['id']}/appInfoLocalizations", bearer)
-    report["infoLocales"] = sorted(item["attributes"]["locale"] for item in localizations["data"])
+    localizations = call_all(
+        "GET", f"/appInfos/{info['id']}/appInfoLocalizations?limit=200", bearer
+    )
+    report["infoLocales"] = sorted(item["attributes"]["locale"] for item in localizations)
     return report
 
 
@@ -239,11 +243,17 @@ def _editable_info(infos):
     )
 
 
-def push(app_id, metadata, bearer, apply=False):
+def push(app_id, metadata, bearer, apply=False, progress=None):
     """Write metadata per locale. Returns the list of planned or applied actions.
 
     With apply=False (the default) nothing is sent — the actions describe what
     a real run would do.
+
+    `progress` is called with each action as it completes. A multi-locale push
+    is a long sequence of live writes that can fail partway through, and an
+    abort that reports nothing leaves the account half-updated with no record
+    of which locales landed. Streaming each one out as it happens means the
+    log is the record, whether the run finishes or not.
     """
     version = editable_version(app_id, bearer)
     if not version:
@@ -256,61 +266,118 @@ def push(app_id, metadata, bearer, apply=False):
     info = _editable_info(infos)
     info_locales = {
         item["attributes"]["locale"]: item["id"]
-        for item in call("GET", f"/appInfos/{info['id']}/appInfoLocalizations", bearer)["data"]
+        for item in call_all(
+            "GET", f"/appInfos/{info['id']}/appInfoLocalizations?limit=200", bearer
+        )
     }
     version_locales = {
         item["attributes"]["locale"]: item["id"]
-        for item in call(
-            "GET", f"/appStoreVersions/{version['id']}/appStoreVersionLocalizations", bearer
-        )["data"]
+        for item in call_all(
+            "GET",
+            f"/appStoreVersions/{version['id']}/appStoreVersionLocalizations?limit=200",
+            bearer,
+        )
     }
 
     actions = []
+
+    def record(locale, resource, existing, attrs, parent):
+        action = {
+            "locale": locale,
+            "resource": resource,
+            "operation": "update" if existing else "create",
+            "fields": sorted(attrs),
+        }
+        if apply:
+            # Report what the write actually did, not what the pre-run snapshot
+            # predicted: creating an appInfoLocalization makes App Store Connect
+            # auto-create the paired appStoreVersionLocalization, so a planned
+            # create becomes an adopt-and-patch mid-run.
+            action["operation"] = _write(bearer, resource, existing, attrs, locale, parent)
+        actions.append(action)
+        if progress:
+            progress(action)
+
     for locale, fields in sorted(metadata.items()):
         info_attrs = {k: v for k, v in fields.items() if k in APP_INFO_FIELDS}
         version_attrs = {k: v for k, v in fields.items() if k in VERSION_FIELDS}
 
         if info_attrs:
-            existing = info_locales.get(locale)
-            actions.append(
-                {
-                    "locale": locale,
-                    "resource": "appInfoLocalizations",
-                    "operation": "update" if existing else "create",
-                    "fields": sorted(info_attrs),
-                }
+            record(
+                locale,
+                "appInfoLocalizations",
+                info_locales.get(locale),
+                info_attrs,
+                ("appInfo", "appInfos", info["id"]),
             )
-            if apply:
-                _write(
-                    bearer,
-                    "appInfoLocalizations",
-                    existing,
-                    info_attrs,
-                    locale,
-                    ("appInfo", "appInfos", info["id"]),
-                )
 
         if version_attrs:
-            existing = version_locales.get(locale)
-            actions.append(
-                {
-                    "locale": locale,
-                    "resource": "appStoreVersionLocalizations",
-                    "operation": "update" if existing else "create",
-                    "fields": sorted(version_attrs),
-                }
+            record(
+                locale,
+                "appStoreVersionLocalizations",
+                version_locales.get(locale),
+                version_attrs,
+                ("appStoreVersion", "appStoreVersions", version["id"]),
             )
-            if apply:
-                _write(
-                    bearer,
-                    "appStoreVersionLocalizations",
-                    existing,
-                    version_attrs,
-                    locale,
-                    ("appStoreVersion", "appStoreVersions", version["id"]),
-                )
 
     return actions
+
+
+PULL_FIELDS = (
+    "name",
+    "subtitle",
+    "keywords",
+    "description",
+    "promotionalText",
+    "whatsNew",
+    "supportUrl",
+    "marketingUrl",
+    "privacyPolicyUrl",
+)
+
+
+def pull(app_id, bearer):
+    """The live listing as {locale: {field: value}} — the shape check and push read.
+
+    Capturing the current listing before overwriting it is the one step that
+    gives a bad push somewhere to roll back to: `pull > baseline.json` and
+    `push baseline.json` is the undo. Fields App Store Connect has never had a
+    value for are omitted rather than emitted as empty, so `check` reports them
+    as missing instead of the file asserting a blank.
+    """
+    version = editable_version(app_id, bearer)
+    infos = call("GET", f"/apps/{app_id}/appInfos", bearer)
+    info = _editable_info(infos)
+
+    listing = {}
+
+    def absorb(items):
+        for item in items:
+            attributes = item.get("attributes") or {}
+            locale = attributes.get("locale")
+            if not locale:
+                continue
+            fields = listing.setdefault(locale, {})
+            for field in PULL_FIELDS:
+                value = attributes.get(field)
+                if value is not None:
+                    fields[field] = value
+
+    absorb(call_all("GET", f"/appInfos/{info['id']}/appInfoLocalizations?limit=200", bearer))
+    if version:
+        absorb(
+            call_all(
+                "GET",
+                f"/appStoreVersions/{version['id']}/appStoreVersionLocalizations?limit=200",
+                bearer,
+            )
+        )
+
+    # Stable field order so a re-pull diffs cleanly against the last baseline.
+    return {
+        locale: {field: fields[field] for field in PULL_FIELDS if field in fields}
+        for locale, fields in sorted(listing.items())
+    }
 
 
 # Per-kind resource wiring: (localization type, relationship name, parent type).
@@ -571,6 +638,13 @@ def push_products(app_id, products, bearer, apply=False):
 
 
 def _write(bearer, resource_type, existing_id, attributes, locale, parent):
+    """Create or update one localization. Returns what actually happened.
+
+    The return value matters: the caller's create-vs-update prediction comes
+    from a snapshot taken before the run, and a create can turn into an adopt
+    partway through. Reporting the prediction would tell the user a locale was
+    created when it was patched.
+    """
     if existing_id:
         call(
             "PATCH",
@@ -578,7 +652,7 @@ def _write(bearer, resource_type, existing_id, attributes, locale, parent):
             bearer,
             {"data": {"type": resource_type, "id": existing_id, "attributes": attributes}},
         )
-        return
+        return "updated"
     relationship, parent_type, parent_id = parent
     try:
         call(
@@ -595,6 +669,7 @@ def _write(bearer, resource_type, existing_id, attributes, locale, parent):
                 }
             },
         )
+        return "created"
     except ASCError as error:
         # Creating an appInfoLocalization makes App Store Connect auto-create
         # the matching appStoreVersionLocalization, so our own create can find
@@ -620,6 +695,7 @@ def _write(bearer, resource_type, existing_id, attributes, locale, parent):
             bearer,
             {"data": {"type": resource_type, "id": adopted, "attributes": attributes}},
         )
+        return "adopted"
 
 
 def _resolve_price_points(bearer, subscription_id, base_territory, customer_price):

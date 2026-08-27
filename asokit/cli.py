@@ -3,6 +3,7 @@
   asokit init                          write a starter config
   asokit storefronts [--check cc]      list / verify storefronts
   asokit research --market de          expand + score, write a report
+  asokit metadata pull                 capture the live listing as JSON
   asokit metadata check <file>         validate limits and duplication
   asokit metadata status               what App Store Connect will accept
   asokit metadata push <file> [--apply]  sync (dry run unless --apply)
@@ -387,16 +388,57 @@ def cmd_metadata_push(args):
             print(f"  - {problem}")
         sys.exit(1)
 
-    actions = asc.push(app_id, data, asc.token(), apply=args.apply)
-    for action in actions:
+    def show(action):
+        # flush: a 37-locale push is long enough that people redirect it to a
+        # file, and Python block-buffers stdout off a TTY. Without this the log
+        # stays empty until the process exits — which is exactly when a failed
+        # run has nothing to say.
         print(
             f"  {action['locale']:<8} {action['resource']:<28} "
-            f"{action['operation']:<6} {', '.join(action['fields'])}"
+            f"{action['operation']:<8} {', '.join(action['fields'])}",
+            flush=True,
         )
+
+    try:
+        actions = asc.push(app_id, data, asc.token(), apply=args.apply, progress=show)
+    except asc.ASCError as error:
+        # The lines above are the record of what already landed. Say so plainly
+        # rather than leaving the user to query the API to find out, and point
+        # at the re-run, which converges because push adopts what it finds.
+        print(f"\naborted — {error}", flush=True)
+        print(
+            "\nThe locales listed above were already written; the rest were not. "
+            "Re-running is safe: push adopts localizations that already exist and "
+            "patches them, so a second pass finishes the job.",
+            flush=True,
+        )
+        sys.exit(1)
+
     if args.apply:
-        print("\napplied — verify in App Store Connect before submitting.")
+        tally = {}
+        for action in actions:
+            tally[action["operation"]] = tally.get(action["operation"], 0) + 1
+        summary = ", ".join(f"{count} {name}" for name, count in sorted(tally.items()))
+        print(f"\napplied ({summary}) — verify in App Store Connect before submitting.")
     else:
         print("\nDRY RUN — nothing written. Re-run with --apply to push.")
+
+
+def cmd_metadata_pull(args):
+    """Capture the live listing, so a bad push has somewhere to roll back to."""
+    config = load_config(args.config) if Path(args.config).exists() else {}
+    app_id = _app_id(args, config)
+    if not app_id:
+        sys.exit("need an appId — pass --app-id or set app.appId in the config")
+
+    listing = asc.pull(app_id, asc.token())
+    rendered = json.dumps(listing, indent=2, ensure_ascii=False)
+    if args.out:
+        Path(args.out).write_text(rendered + "\n")
+        fields = sum(len(v) for v in listing.values())
+        print(f"{args.out} — {len(listing)} locale(s), {fields} field(s)", file=sys.stderr)
+    else:
+        print(rendered)
 
 
 def _locale_rows(label, localizations):
@@ -664,6 +706,13 @@ def build_parser():
     status = metadata_sub.add_parser("status", help="what App Store Connect will accept")
     status.add_argument("--app-id")
     status.set_defaults(func=cmd_metadata_status)
+
+    pull = metadata_sub.add_parser(
+        "pull", help="write the live listing as JSON (the baseline to roll back to)"
+    )
+    pull.add_argument("--app-id")
+    pull.add_argument("--out", help="write here instead of stdout")
+    pull.set_defaults(func=cmd_metadata_pull)
 
     push = metadata_sub.add_parser("push", help="sync metadata (dry run unless --apply)")
     push.add_argument("file")
