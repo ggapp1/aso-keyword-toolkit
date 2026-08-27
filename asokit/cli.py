@@ -275,13 +275,25 @@ def cmd_storefronts(args):
     print(f"\n{len(storefronts.STOREFRONTS)} storefronts. Verify one: asokit storefronts --check de")
 
 
+def output_dir(config, market_name, args):
+    """Where one market's output goes.
+
+    With --all, --out is read as the PARENT of the per-market directories
+    rather than rejected: output is per-market anyway (`aso/<market>/`), so
+    that is the reading the flag invites.
+    """
+    if args.out:
+        return Path(args.out) / market_name if args.all else Path(args.out)
+    return Path(config.get("app", {}).get("outputDir", "aso")) / market_name
+
+
 def run_market(config, market_name, args):
     market = market_config(config, market_name)
     country = market["country"]
     app = config.get("app", {})
     app_id = app.get("appId") or None
 
-    output = Path(args.out or Path(app.get("outputDir", "aso")) / market_name)
+    output = output_dir(config, market_name, args)
     output.mkdir(parents=True, exist_ok=True)
     cache = None if args.no_cache else sources.Cache(output / ".cache.json")
 
@@ -292,23 +304,25 @@ def run_market(config, market_name, args):
 
     seeds = market["seeds"]
     seeds_lower = {seed.lower() for seed in seeds}
-    print(f"\n{storefronts.name(country)} — expanding {len(seeds)} seeds")
+    print(f"\n{storefronts.name(country)} — expanding {len(seeds)} seeds", flush=True)
 
     evidence = research.expand(
         seeds,
         country,
         cache,
-        progress=lambda seed, count: print(f"  {seed} -> {count} suggestions"),
+        progress=lambda seed, count: print(f"  {seed} -> {count} suggestions", flush=True),
     )
     (output / "expansion.json").write_text(json.dumps(evidence, indent=2, ensure_ascii=False))
 
     candidates = research.rank_candidates(evidence, args.limit, seeds_lower)
     minutes = len(candidates) * sources.SEARCH_DELAY / 60
-    print(f"scoring {len(candidates)} candidates (~{minutes:.0f} min if not cached)")
+    print(
+        f"scoring {len(candidates)} candidates (~{minutes:.0f} min if not cached)", flush=True
+    )
 
     scores = []
     for index, term in enumerate(candidates, start=1):
-        print(f"  [{index}/{len(candidates)}] {term}")
+        print(f"  [{index}/{len(candidates)}] {term}", flush=True)
         scores.append(
             research.score(
                 term, evidence[term], country, app_id, cache, seeds_lower, our_genre
@@ -363,17 +377,25 @@ def cmd_research(args):
     else:
         sys.exit("pass --market <code> or --all")
 
-    if args.all and args.out:
-        sys.exit("--out sets a single directory; it cannot be combined with --all")
-
+    done = []
     for name in markets:
+        if args.resume and (output_dir(config, name, args) / "scores.json").exists():
+            # A failure at market 30 of 37 otherwise loses the whole loop: the
+            # response cache keeps the data, but every market is re-driven.
+            print(f"\n{name}: already scored, skipping (--resume)", flush=True)
+            continue
         output, scores, app_id = run_market(config, name, args)
-        print(f"\n{output / 'report.md'}")
+        done.append(name)
+        print(f"\n{output / 'report.md'}", flush=True)
         for line in summarize(scores, app_id):
-            print(line)
+            print(line, flush=True)
 
-    print("\nRead the report, then draft metadata and validate it:")
-    print("  asokit metadata check my-metadata.json")
+    if not done and args.resume:
+        print("\nEvery configured market already has scores. Drop --resume to redo them.")
+        return
+    print("\nRead the report, then draft the keyword field and validate it:")
+    print("  asokit metadata suggest --all --baseline baseline.json --json --out draft.json")
+    print("  asokit metadata check draft.json")
 
 
 def cmd_metadata_check(args):
@@ -853,7 +875,14 @@ def build_parser():
         "--all", action="store_true", help="run every market in the config"
     )
     research_command.add_argument("--limit", type=int, default=45, help="candidates to score")
-    research_command.add_argument("--out", help="output directory")
+    research_command.add_argument(
+        "--out", help="output directory; with --all, the parent of the per-market directories"
+    )
+    research_command.add_argument(
+        "--resume",
+        action="store_true",
+        help="skip markets that already have scores, to continue an interrupted --all run",
+    )
     research_command.add_argument("--no-cache", action="store_true")
     research_command.set_defaults(func=cmd_research)
 
