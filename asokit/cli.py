@@ -3,6 +3,7 @@
   asokit init                          write a starter config
   asokit storefronts [--check cc]      list / verify storefronts
   asokit research --market de          expand + score, write a report
+  asokit metadata suggest --market de  pack research into a keyword field
   asokit metadata pull                 capture the live listing as JSON
   asokit metadata check <file>         validate limits and duplication
   asokit metadata status               what App Store Connect will accept
@@ -19,7 +20,17 @@ import os
 import sys
 from pathlib import Path
 
-from . import asc, metadata as meta, products as prod, report, research, sources, storefronts, suggest
+from . import (
+    asc,
+    metadata as meta,
+    packing,
+    products as prod,
+    report,
+    research,
+    sources,
+    storefronts,
+    suggest,
+)
 
 DEFAULT_CONFIG = "asokit.json"
 
@@ -424,6 +435,110 @@ def cmd_metadata_push(args):
         print("\nDRY RUN — nothing written. Re-run with --apply to push.")
 
 
+def _market_locale(config, market):
+    entry = market_config(config, market)
+    return entry.get("locale") or storefronts.default_locale(entry["country"])
+
+
+def cmd_metadata_suggest(args):
+    """Pack researched candidates into a keyword field — the missing middle step.
+
+    `research` produces scored candidates and `check` validates a finished
+    field; drafting the field between them is the hard part, and leaving it to
+    the caller means everyone reimplements the same four defects.
+    """
+    config = load_config(args.config)
+    app = config.get("app", {})
+    if not args.all and not args.market:
+        sys.exit("pass --market <code> or --all")
+    markets = list(config["markets"]) if args.all else [args.market]
+
+    baseline = json.loads(Path(args.baseline).read_text()) if args.baseline else {}
+    blocked = {word.strip().lower() for word in (args.block or "").split(",") if word.strip()}
+    root = Path(args.dir or app.get("outputDir", "aso"))
+
+    drafted = {}
+    for market in markets:
+        locale = _market_locale(config, market)
+        scores_path = root / market / "scores.json"
+        if not scores_path.exists():
+            message = f"no scores at {scores_path} — run `asokit research --market {market}` first"
+            if args.all:
+                print(f"  {market:<4} skipped: {message}", file=sys.stderr)
+                continue
+            sys.exit(message)
+
+        live = baseline.get(locale, {})
+        name = args.name if args.name is not None else live.get("name", "")
+        subtitle = args.subtitle if args.subtitle is not None else live.get("subtitle", "")
+
+        candidates = json.loads(scores_path.read_text())
+        # Live terms join the pool last so researched ones win the early slots.
+        # Without this, a hand-picked term that is already ranking is silently
+        # discarded just because autocomplete never proposed it.
+        candidates += packing.incumbent_candidates(live.get("keywords", ""))
+
+        field = packing.select_keywords(
+            candidates, name, subtitle, limit=args.limit, blocked=blocked, locale=locale
+        )
+        drafted[locale] = {"keywords": field}
+
+        if not args.json:
+            print(f"\n{market} -> {locale}  ({len(field)}/{args.limit} characters)")
+            if not name and not subtitle:
+                print(
+                    "  no name or subtitle known, so words they already cover were not "
+                    "excluded — pass --name/--subtitle or --baseline"
+                )
+            print(f"  {field}")
+            kept = set(packing.words(field.replace(",", " ")))
+            dropped = _dropped_reasons(candidates, kept, blocked, locale)
+            if dropped:
+                print("  dropped: " + "; ".join(dropped))
+
+    if args.json:
+        rendered = json.dumps(drafted, indent=2, ensure_ascii=False)
+        if args.out:
+            Path(args.out).write_text(rendered + "\n")
+            print(f"{args.out} — {len(drafted)} locale(s)", file=sys.stderr)
+        else:
+            print(rendered)
+    else:
+        print("\nMerge these into your metadata file, then: asokit metadata check <file>")
+
+
+def _dropped_reasons(candidates, kept, blocked, locale):
+    """A short account of what the packer threw away, so it shows its work."""
+    brands = packing.brand_words(candidates)
+    filler = packing.language_filler(locale)
+    # Brand words are taken from the set directly: most of them reach the pool
+    # only through `topApps` names and never appear in a candidate term, so
+    # walking the terms alone would report none of them.
+    seen = {"brand": brands - kept, "filler": set(), "blocked": set()}
+    for item in candidates:
+        if item.get("looksLikeAppName") or item.get("offCategory"):
+            continue
+        for word in packing.words(item.get("term")):
+            if word in kept or word in seen["brand"]:
+                continue
+            if word in blocked:
+                seen["blocked"].add(word)
+            elif packing.is_latin(word) and (
+                word in filler or meta.stem(word, locale) in filler
+            ):
+                seen["filler"].add(word)
+    labels = {
+        "brand": "competitor app-name fragments",
+        "filler": "stopwords",
+        "blocked": "blocked",
+    }
+    return [
+        f"{labels[key]} ({', '.join(sorted(found)[:6])})"
+        for key, found in seen.items()
+        if found
+    ]
+
+
 def cmd_metadata_pull(args):
     """Capture the live listing, so a bad push has somewhere to roll back to."""
     config = load_config(args.config) if Path(args.config).exists() else {}
@@ -706,6 +821,27 @@ def build_parser():
     status = metadata_sub.add_parser("status", help="what App Store Connect will accept")
     status.add_argument("--app-id")
     status.set_defaults(func=cmd_metadata_status)
+
+    suggest_field = metadata_sub.add_parser(
+        "suggest", help="pack researched candidates into a keyword field"
+    )
+    suggest_field.add_argument("--market", help="country code from your config")
+    suggest_field.add_argument("--all", action="store_true", help="every configured market")
+    suggest_field.add_argument(
+        "--baseline", help="metadata pull output: supplies name, subtitle and live keywords"
+    )
+    suggest_field.add_argument("--name", help="override the name used for deduplication")
+    suggest_field.add_argument("--subtitle", help="override the subtitle used for deduplication")
+    suggest_field.add_argument(
+        "--block", help="comma-separated words to drop that no rule catches"
+    )
+    suggest_field.add_argument("--limit", type=int, default=meta.LIMITS["keywords"])
+    suggest_field.add_argument("--dir", help="where research wrote its output")
+    suggest_field.add_argument(
+        "--json", action="store_true", help="emit {locale: {keywords}} instead of a report"
+    )
+    suggest_field.add_argument("--out", help="with --json, write here instead of stdout")
+    suggest_field.set_defaults(func=cmd_metadata_suggest)
 
     pull = metadata_sub.add_parser(
         "pull", help="write the live listing as JSON (the baseline to roll back to)"
