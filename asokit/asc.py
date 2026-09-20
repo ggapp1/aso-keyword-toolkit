@@ -1128,6 +1128,10 @@ def push_screenshots(app_id, plan, bearer, apply=False, progress=None):
     localizations = _localizations(version["id"], bearer)
     actions = []
     for locale, families in sorted(plan.items()):
+        # A full-catalog push outlives the 20-minute token; re-mint per locale
+        # when real credentials are present (tests pass a literal bearer).
+        if apply and os.environ.get("ASC_KEY_ID"):
+            bearer = token()
         loc_id = localizations.get(locale)
         if not loc_id:
             raise ASCError(f"{locale}: no localization on {version['attributes']['versionString']} — push metadata for it first")
