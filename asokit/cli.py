@@ -895,12 +895,13 @@ def cmd_screenshots_push(args):
         print(f"\nuploaded {len(ids)} screenshots across {len(actions)} sets; waiting for Apple to process…", flush=True)
         import time as _time
         for _ in range(60):
+            bearer = asc.token()   # the upload itself can outlive the 20-minute JWT
             states = asc.screenshot_states(ids, bearer)
             pending = [s for s in states.values() if s not in asc.SCREENSHOT_DONE and s != "FAILED"]
             if not pending:
                 break
             _time.sleep(10)
-        states = asc.screenshot_states(ids, bearer)
+        states = asc.screenshot_states(ids, asc.token())
         failed = [sid for sid, s in states.items() if s == "FAILED"]
         print(f"processed: {sum(1 for s in states.values() if s in asc.SCREENSHOT_DONE)} complete, "
               f"{len(failed)} failed, {len(states) - len(failed) - sum(1 for s in states.values() if s in asc.SCREENSHOT_DONE)} still pending")
