@@ -22,6 +22,7 @@ the App Manager role. Requires `pyjwt` and `cryptography`; everything else in
 this toolkit is standard library only.
 """
 
+import hashlib
 import json
 import os
 import socket
@@ -1017,3 +1018,145 @@ def apply_products(app_id, desired, bearer, apply=False):
         executed.append(action)
 
     return executed
+
+
+# ---------------------------------------------------------------------------
+# Screenshots
+#
+# A localization owns one appScreenshotSet per display family; a set owns up
+# to ten appScreenshots. Uploading one image is three calls: reserve
+# (POST appScreenshots → upload operations), PUT the bytes to each operation's
+# pre-signed URL with its headers, then commit (PATCH uploaded=true + md5).
+# Apple processes the asset asynchronously; `assetDeliveryState` reports it.
+# ---------------------------------------------------------------------------
+
+SCREENSHOT_DONE = frozenset({"COMPLETE", "UPLOAD_COMPLETE"})
+
+
+def _raw(method, url, headers, data):
+    """A non-JSON request (pre-signed upload PUTs, CDN downloads)."""
+    request = urllib.request.Request(url, data=data, method=method)
+    for name, value in headers.items():
+        request.add_header(name, value)
+    with urllib.request.urlopen(request, timeout=120) as response:
+        return response.read()
+
+
+def _localizations(version_id, bearer):
+    return {
+        item["attributes"]["locale"]: item["id"]
+        for item in call_all(
+            "GET", f"/appStoreVersions/{version_id}/appStoreVersionLocalizations?limit=200", bearer
+        )
+    }
+
+
+def _screenshot_sets(localization_id, bearer):
+    return {
+        item["attributes"]["screenshotDisplayType"]: item["id"]
+        for item in call("GET", f"/appStoreVersionLocalizations/{localization_id}/appScreenshotSets", bearer)["data"]
+    }
+
+
+def _screenshots(set_id, bearer):
+    return call_all("GET", f"/appScreenshotSets/{set_id}/appScreenshots?limit=200", bearer)
+
+
+def screenshots_status(app_id, bearer):
+    """{locale: {displayType: count}} on the editable version, plus the version."""
+    version = editable_version(app_id, bearer)
+    if not version:
+        raise ASCError("No editable App Store version — screenshots are only writable in Prepare for Submission.")
+    report = {}
+    for locale, loc_id in sorted(_localizations(version["id"], bearer).items()):
+        report[locale] = {
+            display: len(_screenshots(set_id, bearer))
+            for display, set_id in _screenshot_sets(loc_id, bearer).items()
+        }
+    return version["attributes"]["versionString"], report
+
+
+def mirror_sources(app_id, from_locale, display_types, bearer):
+    """Download `from_locale`'s live screenshots for `display_types` on the
+    editable version → {displayType: [(fileName, bytes), ...]} in store order."""
+    version = editable_version(app_id, bearer)
+    loc_id = _localizations(version["id"], bearer).get(from_locale)
+    if not loc_id:
+        raise ASCError(f"{from_locale} has no localization on {version['attributes']['versionString']}")
+    sets = _screenshot_sets(loc_id, bearer)
+    out = {}
+    for display in display_types:
+        if display not in sets:
+            raise ASCError(f"{from_locale} has no {display} screenshots to mirror")
+        images = []
+        for shot in _screenshots(sets[display], bearer):
+            asset = shot["attributes"]["imageAsset"]
+            url = (asset["templateUrl"].replace("{w}", str(asset["width"])).replace("{h}", str(asset["height"]))
+                   .replace("{c}", "").replace("{f}", "png"))
+            images.append((shot["attributes"]["fileName"], _raw("GET", url, {}, None)))
+        out[display] = images
+    return out
+
+
+def _upload_screenshot(set_id, name, data, bearer):
+    reserved = call("POST", "/appScreenshots", bearer, {"data": {
+        "type": "appScreenshots",
+        "attributes": {"fileName": name, "fileSize": len(data)},
+        "relationships": {"appScreenshotSet": {"data": {"type": "appScreenshotSets", "id": set_id}}},
+    }})["data"]
+    for op in reserved["attributes"]["uploadOperations"]:
+        chunk = data[op["offset"]: op["offset"] + op["length"]]
+        _raw(op["method"], op["url"], {h["name"]: h["value"] for h in op.get("requestHeaders", [])}, chunk)
+    call("PATCH", f"/appScreenshots/{reserved['id']}", bearer, {"data": {
+        "type": "appScreenshots", "id": reserved["id"],
+        "attributes": {"uploaded": True, "sourceFileChecksum": hashlib.md5(data).hexdigest()},
+    }})
+    return reserved["id"]
+
+
+def push_screenshots(app_id, plan, bearer, apply=False, progress=None):
+    """Replace screenshot sets per locale on the editable version.
+
+    plan: {locale: {displayType: [Path | (fileName, bytes), ...]}}. Every set
+    named in the plan is REPLACED: its current screenshots are deleted and the
+    plan's files uploaded in order. Sets not named are left alone. Dry run by
+    default; returns the action list either way.
+    """
+    version = editable_version(app_id, bearer)
+    if not version:
+        raise ASCError("No editable App Store version — screenshots are only writable in Prepare for Submission.")
+    localizations = _localizations(version["id"], bearer)
+    actions = []
+    for locale, families in sorted(plan.items()):
+        loc_id = localizations.get(locale)
+        if not loc_id:
+            raise ASCError(f"{locale}: no localization on {version['attributes']['versionString']} — push metadata for it first")
+        sets = _screenshot_sets(loc_id, bearer)
+        for display, files in families.items():
+            set_id = sets.get(display)
+            existing = _screenshots(set_id, bearer) if set_id else []
+            action = {"locale": locale, "display": display, "set": "update" if set_id else "create",
+                      "delete": len(existing), "upload": len(files), "ids": []}
+            if apply:
+                if not set_id:
+                    set_id = call("POST", "/appScreenshotSets", bearer, {"data": {
+                        "type": "appScreenshotSets",
+                        "attributes": {"screenshotDisplayType": display},
+                        "relationships": {"appStoreVersionLocalization": {"data": {"type": "appStoreVersionLocalizations", "id": loc_id}}},
+                    }})["data"]["id"]
+                for shot in existing:
+                    call("DELETE", f"/appScreenshots/{shot['id']}", bearer)
+                for file in files:
+                    name, data = (file if isinstance(file, tuple) else (file.name, Path(file).read_bytes()))
+                    action["ids"].append(_upload_screenshot(set_id, name, data, bearer))
+                call("PATCH", f"/appScreenshotSets/{set_id}/relationships/appScreenshots", bearer,
+                     {"data": [{"type": "appScreenshots", "id": sid} for sid in action["ids"]]})
+            actions.append(action)
+            if progress:
+                progress(action)
+    return actions
+
+
+def screenshot_states(ids, bearer):
+    """{id: assetDeliveryState.state} — poll until every one is COMPLETE or FAILED."""
+    return {sid: call("GET", f"/appScreenshots/{sid}", bearer)["data"]["attributes"]["assetDeliveryState"]["state"] for sid in ids}

@@ -30,6 +30,7 @@ from . import (
     sources,
     storefronts,
     suggest,
+    screenshots as shots,
 )
 
 DEFAULT_CONFIG = "asokit.json"
@@ -840,6 +841,76 @@ def cmd_products_apply(args):
         print("\nDRY RUN — nothing written. Re-run with --apply to provision.")
 
 
+def cmd_screenshots_status(args):
+    config = load_config(args.config) if Path(args.config).exists() else {}
+    app_id = _app_id(args, config)
+    if not app_id:
+        sys.exit("need an appId — pass --app-id or set app.appId in the config")
+    version, report = asc.screenshots_status(app_id, asc.token())
+    print(f"editable version: {version}")
+    for locale, families in report.items():
+        line = ", ".join(f"{d} ×{n}" for d, n in sorted(families.items())) or "(inherits primary locale)"
+        print(f"  {locale:<8} {line}")
+
+
+def cmd_screenshots_push(args):
+    config = load_config(args.config) if Path(args.config).exists() else {}
+    app_id = _app_id(args, config)
+    if not app_id:
+        sys.exit("need an appId — pass --app-id or set app.appId in the config")
+    plan = shots.plan_from_directory(args.directory, args.display)
+    if args.locales:
+        wanted = set(args.locales.split(","))
+        plan = {k: v for k, v in plan.items() if k in wanted}
+    problems = shots.check(plan)
+    if problems:
+        print("validation failed — nothing sent:")
+        for problem in problems:
+            print(f"  - {problem}")
+        sys.exit(1)
+    bearer = asc.token()
+    if args.mirror:
+        displays = args.mirror.split(",")
+        sources = asc.mirror_sources(app_id, args.mirror_from, displays, bearer)
+        for locale, families in plan.items():
+            if locale == args.mirror_from:
+                continue
+            for display, images in sources.items():
+                families[display] = images
+        print(f"mirroring {', '.join(f'{d} ×{len(i)}' for d, i in sources.items())} from {args.mirror_from} into every other locale")
+
+    def show(action):
+        print(f"  {action['locale']:<8} {action['display']:<24} set:{action['set']:<7} "
+              f"delete {action['delete']:>2}  upload {action['upload']:>2}", flush=True)
+
+    try:
+        actions = asc.push_screenshots(app_id, plan, bearer, apply=args.apply, progress=show)
+    except asc.ASCError as error:
+        print(f"\naborted — {error}", flush=True)
+        print("\nSets listed above were already replaced; the rest were not. Re-running is safe: "
+              "each set is replaced whole, so a second pass converges.", flush=True)
+        sys.exit(1)
+    if args.apply:
+        ids = [sid for a in actions for sid in a["ids"]]
+        print(f"\nuploaded {len(ids)} screenshots across {len(actions)} sets; waiting for Apple to process…", flush=True)
+        import time as _time
+        for _ in range(60):
+            states = asc.screenshot_states(ids, bearer)
+            pending = [s for s in states.values() if s not in asc.SCREENSHOT_DONE and s != "FAILED"]
+            if not pending:
+                break
+            _time.sleep(10)
+        states = asc.screenshot_states(ids, bearer)
+        failed = [sid for sid, s in states.items() if s == "FAILED"]
+        print(f"processed: {sum(1 for s in states.values() if s in asc.SCREENSHOT_DONE)} complete, "
+              f"{len(failed)} failed, {len(states) - len(failed) - sum(1 for s in states.values() if s in asc.SCREENSHOT_DONE)} still pending")
+        if failed:
+            sys.exit(1)
+        print("applied — verify in App Store Connect before submitting.")
+    else:
+        print("\nDRY RUN — nothing written. Re-run with --apply to push.")
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="asokit",
@@ -984,6 +1055,21 @@ def build_parser():
         "--verbose", action="store_true", help="list every territory instead of a count"
     )
     products_apply.set_defaults(func=cmd_products_apply)
+
+    screenshots_command = subcommands.add_parser("screenshots", help="inspect and replace App Store screenshots")
+    screenshots_sub = screenshots_command.add_subparsers(dest="screenshots_command", required=True)
+    screenshots_status = screenshots_sub.add_parser("status", help="screenshot sets per locale on the editable version")
+    screenshots_status.add_argument("--app-id")
+    screenshots_status.set_defaults(func=cmd_screenshots_status)
+    screenshots_push = screenshots_sub.add_parser("push", help="replace screenshot sets from DIR/<locale>/*.png (dry run unless --apply)")
+    screenshots_push.add_argument("directory")
+    screenshots_push.add_argument("--display", default="APP_IPHONE_67", help="display family for DIR's PNGs (default APP_IPHONE_67)")
+    screenshots_push.add_argument("--locales", help="comma-separated subset of locale folders")
+    screenshots_push.add_argument("--mirror", help="comma-separated display types to copy from --mirror-from into every other locale (e.g. iPad + Watch sets)")
+    screenshots_push.add_argument("--mirror-from", default="en-US")
+    screenshots_push.add_argument("--app-id")
+    screenshots_push.add_argument("--apply", action="store_true")
+    screenshots_push.set_defaults(func=cmd_screenshots_push)
 
     return parser
 
