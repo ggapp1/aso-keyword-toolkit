@@ -131,6 +131,8 @@ REUSABLE = frozenset({"UPLOAD_COMPLETE", "COMPLETE", "PREPARE_FOR_SUBMISSION", "
                       "WAITING_FOR_REVIEW", "IN_REVIEW", "ACCEPTED", "APPROVED"})
 PROCESSED = REUSABLE - {"UPLOAD_COMPLETE"}
 TERMINAL_BAD = frozenset({"FAILED", "REJECTED", "ARCHIVED"})
+REVIEW_PASSED = frozenset({"ACCEPTED", "APPROVED"})
+TIMEOUT = "TIMEOUT"
 
 
 class RejectedAsset(asc.ASCError):
@@ -160,11 +162,22 @@ def find_reusable(library, reference, category, bearer):
         f"&filter[category]={category}&limit=200",
         bearer,
     )
-    usable = [row for row in rows if row["attributes"].get("state") in REUSABLE]
-    if usable:
-        return usable[0]
-    if any(row["attributes"].get("state") == "REJECTED" for row in rows):
+
+    def state(row):
+        return row["attributes"].get("state")
+
+    usable = [row for row in rows if state(row) in REUSABLE]
+    if any(state(row) == "REJECTED" for row in rows):
+        # A rejected twin means App Review has seen these bytes: only a twin
+        # that review has since accepted is safe; anything still unreviewed
+        # would most likely be rejected again.
+        reviewed = [row for row in usable if state(row) in REVIEW_PASSED]
+        if reviewed:
+            return reviewed[0]
         raise RejectedAsset(f"{reference}: this exact image was rejected by App Review — change it and re-render")
+    if usable:
+        # Prefer a processed row (it carries a specId) over UPLOAD_COMPLETE.
+        return next((row for row in usable if state(row) in PROCESSED), usable[0])
     return None
 
 
@@ -184,7 +197,12 @@ def upload_image(library, file_name, data, category, reference, bearer):
 
 
 def wait_processed(library, ids, bearer, timeout_s=900):
-    """Batch-poll until every id is processed or terminally bad; backoff 5 → 30 s."""
+    """Batch-poll until every id is processed or terminally bad; backoff 5 → 30 s.
+
+    Ids still unfinished at the deadline (or never returned by the API) come
+    back with state TIMEOUT, so callers checking against PROCESSED treat them
+    as failures rather than silently missing them.
+    """
     states, pending = {}, set(ids)
     delay, deadline = 5, time.time() + timeout_s
     while pending:
@@ -199,6 +217,9 @@ def wait_processed(library, ids, bearer, timeout_s=900):
             break
         time.sleep(delay)
         delay = min(delay * 2, 30)
+    for image_id in pending:
+        last = states.get(image_id, {})
+        states[image_id] = {"state": TIMEOUT, "specId": last.get("specId"), "stateDetails": last.get("stateDetails")}
     return states
 
 

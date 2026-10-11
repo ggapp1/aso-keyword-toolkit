@@ -114,5 +114,65 @@ class UploadTests(unittest.TestCase):
         self.assertEqual(states[result["asset"]]["state"], "FAILED")
 
 
+class ReuseRulingTests(unittest.TestCase):
+    """Fix round 1: rejected twins, preference for processed rows, wait timeout."""
+
+    def setUp(self):
+        self.fake = install(self, FakeConnect())
+        self.data = png_bytes(5244, 2950)
+        self.ref, _ = library.reference_name("en-US.png", self.data)
+
+    def twins(self, *states):
+        ids = []
+        for state in states:
+            image_id = library.upload_image("lib1", "en-US.png", self.data, library.CREATIVE, self.ref, "t")
+            self.fake.images[image_id]["state"] = state
+            ids.append(image_id)
+        return ids
+
+    def test_rejected_with_unreviewed_twin_stops(self):
+        for twin in ("WAITING_FOR_REVIEW", "PREPARE_FOR_SUBMISSION", "UPLOAD_COMPLETE", "IN_REVIEW"):
+            with self.subTest(twin=twin):
+                self.fake.images.clear()
+                self.twins("REJECTED", twin)
+                with self.assertRaises(library.RejectedAsset):
+                    library.find_reusable("lib1", self.ref, library.CREATIVE, "t")
+
+    def test_rejected_with_approved_twin_reuses_approved(self):
+        for twin in ("APPROVED", "ACCEPTED"):
+            with self.subTest(twin=twin):
+                self.fake.images.clear()
+                _, waiting, good = self.twins("REJECTED", "WAITING_FOR_REVIEW", twin)
+                found = library.find_reusable("lib1", self.ref, library.CREATIVE, "t")
+                self.assertEqual(found["id"], good)
+
+    def test_prefers_processed_over_upload_complete(self):
+        pending, processed = self.twins("UPLOAD_COMPLETE", "PREPARE_FOR_SUBMISSION")
+        self.fake.images[pending]["specId"] = None  # Apple assigns specId only once processed
+        found = library.find_reusable("lib1", self.ref, library.CREATIVE, "t")
+        self.assertEqual(found["id"], processed)
+        self.assertIsNotNone(found["attributes"]["specId"])
+
+    def test_upload_complete_alone_is_still_reused(self):
+        (only,) = self.twins("UPLOAD_COMPLETE")
+        self.assertEqual(library.find_reusable("lib1", self.ref, library.CREATIVE, "t")["id"], only)
+
+    def test_wait_marks_unfinished_ids_as_timeout(self):
+        self.fake.after_commit = "UPLOAD_COMPLETE"
+        uploader = library.Uploader("lib1", "t", apply=True)
+        result = uploader.ensure("en-US.png", self.data, library.CREATIVE)
+        states = library.wait_processed("lib1", uploader.new_ids + ["img-missing"], "t", timeout_s=0)
+        self.assertEqual(states[result["asset"]]["state"], "TIMEOUT")
+        self.assertEqual(states["img-missing"]["state"], "TIMEOUT")
+        self.assertNotIn("TIMEOUT", library.PROCESSED)
+
+    def test_wait_keeps_final_states_alongside_timeouts(self):
+        uploader = library.Uploader("lib1", "t", apply=True)
+        done = uploader.ensure("en-US.png", self.data, library.CREATIVE)["asset"]
+        states = library.wait_processed("lib1", [done, "img-missing"], "t", timeout_s=0)
+        self.assertEqual(states[done]["state"], "PREPARE_FOR_SUBMISSION")
+        self.assertEqual(states["img-missing"]["state"], "TIMEOUT")
+
+
 if __name__ == "__main__":
     unittest.main()
