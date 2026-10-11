@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from asokit import asc, cpp, cpp_apply, library
+from asokit import asc, cpp, cpp_apply, library, review
 from tests.fakes import FakeCppConnect, install
 from tests.test_cpp import make_doc, page
 
@@ -234,11 +234,6 @@ class PushTests(unittest.TestCase):
         self.assertEqual([p["name"] for p in self.fake.pages.values()], ["Report"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-from asokit import review
 
 
 class PublishSubmitTests(unittest.TestCase):
@@ -278,8 +273,6 @@ class PublishSubmitTests(unittest.TestCase):
         self.assertEqual([i[0] for i in items], ["appCustomProductPageVersion"])
 
     def test_submit_refuses_failed_placement(self):
-        for placement in self.fake.placements.values():
-            placement["state_override"] = "FAILED"
         original = self.fake._surface
 
         def failing(kind, parent):
@@ -296,3 +289,40 @@ class PublishSubmitTests(unittest.TestCase):
         self.set_state("IN_REVIEW")
         with self.assertRaises(review.SubmissionBlocked):
             cpp_apply.submit("1", self.doc, ["BPD tracker"], "t", apply=True, out=lambda line: None)
+
+    def other_doc(self, pages):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return make_doc(tmp.name, pages)
+
+    def test_publish_is_all_or_nothing(self):
+        self.set_state("APPROVED")
+        self.fake.add_page("Draft page", state="PREPARE_FOR_SUBMISSION", visible=False)
+        with self.assertRaises(cpp_apply.PublishError):
+            cpp_apply.publish("1", ["BPD tracker", "Draft page"], "t", apply=True, out=lambda line: None)
+        self.assertFalse(self.fake.pages[self.page_id]["visible"])
+
+    def test_submit_refuses_declared_locale_missing_from_version(self):
+        doc = self.other_doc([page(extra_locales={"en-GB": {"promotionalText": "Hi", "keywords": ["symptom"]}})])
+        with self.assertRaisesRegex(review.SubmissionBlocked, "en-GB: declared in the file but missing"):
+            cpp_apply.submit("1", doc, ["BPD tracker"], "t", apply=True, out=lambda line: None)
+        self.assertEqual(self.fake.submissions, {})
+
+    def test_submit_refuses_declared_family_not_placed(self):
+        declared = page()
+        declared["locales"]["en-US"]["screenshots"].append(
+            {"dir": "shots/en-US", "order": ["06", "02"], "display": "APP_IPAD_PRO_3GEN_129"})
+        doc = self.other_doc([declared])
+        with self.assertRaisesRegex(review.SubmissionBlocked, "APP_IPAD_PRO_3GEN_129 screenshots but none are placed"):
+            cpp_apply.submit("1", doc, ["BPD tracker"], "t", apply=True, out=lambda line: None)
+        self.assertEqual(self.fake.submissions, {})
+
+    def test_submit_dry_run_happy_path(self):
+        result = cpp_apply.submit("1", self.doc, ["BPD tracker"], "t", apply=False, out=lambda line: None)
+        self.assertEqual([i[0] for i in result["add"]], ["appCustomProductPageVersion"])
+        self.assertFalse(result["submitted"])
+        self.assertEqual(self.fake.submissions, {})
+
+
+if __name__ == "__main__":
+    unittest.main()

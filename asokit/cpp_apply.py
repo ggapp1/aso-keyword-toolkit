@@ -402,6 +402,26 @@ SUBMITTABLE = cpp.EDITABLE
 BAD_PLACEMENT = frozenset({"ASSET_PROCESSING", "FAILED"})
 
 
+def _check_declared(name, file_page, localizations, catalog, creative_supported):
+    """Every locale the file declares for this page must exist on the version
+    with the declared media placed: one screenshot placement per declared
+    display family (matched by catalog display class) and a header placement
+    when a creative is declared and the catalog supports it."""
+    if not file_page:
+        return
+    for locale, declared in sorted(file_page.get("locales", {}).items()):
+        loc = localizations.get(locale)
+        if loc is None:
+            raise review.SubmissionBlocked(f"'{name}' {locale}: declared in the file but missing from the version — run cpp push")
+        shot_classes = {catalog.display_class(p["group"]) for p in loc["placements"] if p["type"] == library.SCREENSHOT}
+        for entry in declared.get("screenshots") or []:
+            wanted = shots.LEGACY_DISPLAY_CLASS.get(entry.get("display"))
+            if wanted is None or wanted not in shot_classes:
+                raise review.SubmissionBlocked(f"'{name}' {locale}: the file declares {entry.get('display')} screenshots but none are placed — run cpp push")
+        if declared.get("creative") and creative_supported and not any(p["type"] == library.HEADER for p in loc["placements"]):
+            raise review.SubmissionBlocked(f"'{name}' {locale}: the file declares a creative but none is placed — run cpp push")
+
+
 def submit(app_id, doc, names, bearer, apply, ledger=NULL, out=print):
     """Send the named pages' latest versions to App Review via review.submit."""
     # Cheap read-only guard first: an in-flight submission or a foreign draft
@@ -422,12 +442,7 @@ def submit(app_id, doc, names, bearer, apply, ledger=NULL, out=print):
             states = {p["state"] for p in loc["placements"]}
             if states & BAD_PLACEMENT:
                 raise review.SubmissionBlocked(f"'{name}' {locale}: placements still {sorted(states & BAD_PLACEMENT)} — wait or re-push")
-            declared = (pages.get(name) or {}).get("locales", {}).get(locale) or {}
-            types = {p["type"] for p in loc["placements"]}
-            if declared.get("screenshots") and library.SCREENSHOT not in types:
-                raise review.SubmissionBlocked(f"'{name}' {locale}: the file declares screenshots but none are placed — run cpp push")
-            if declared.get("creative") and supported and library.HEADER not in types:
-                raise review.SubmissionBlocked(f"'{name}' {locale}: the file declares a creative but none is placed — run cpp push")
+        _check_declared(name, pages.get(name), version["localizations"], catalog, supported)
         items.append(("appCustomProductPageVersion", "appCustomProductPageVersions", version["id"]))
         out(f"  {name}: version {version['id']} ({version['state']})")
     return review.submit(app_id, items, bearer, apply, ledger=ledger, command="cpp submit")
