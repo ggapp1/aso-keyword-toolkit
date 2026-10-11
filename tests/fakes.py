@@ -241,3 +241,125 @@ def install(testcase, fake):
         patch.start()
         testcase.addCleanup(patch.stop)
     return fake
+
+
+class FakeCppConnect(FakeConnect):
+    """FakeConnect plus custom product pages, keyword pools and legacy screenshot sets."""
+
+    POOL_US = ["mania", "depression", "hypomania", "episode", "medication", "mental", "health",
+               "borderline", "cyclothymia", "bpd", "triggers", "adhd"]
+    POOL_GB = ["symptom", "depression", "hypomania", "diary", "medication", "mental", "health",
+               "borderline", "cyclothymia", "bpd", "triggers", "adhd"]
+
+    def __init__(self):
+        super().__init__()
+        self.versions.append({"id": "v0", "attributes": {"appStoreState": "READY_FOR_SALE", "versionString": "2.2.0"}})
+        self.version_locs["v0"] = {"en-US": "vl0-en", "en-GB": "vl0-gb"}
+        self.version_locs["v1"] = {"en-US": "vl-en", "en-GB": "vl-gb"}
+        self.pool = {"vl0-en": list(self.POOL_US), "vl0-gb": list(self.POOL_GB),
+                     "vl-en": list(self.POOL_US), "vl-gb": list(self.POOL_GB)}
+        self.legacy_sets = {"vl0-en": ["APP_IPHONE_67", "APP_IPAD_PRO_3GEN_129"]}
+        self.pages = {}       # id -> {"name", "visible", "template"}
+        self.cpp_versions = {}  # id -> {"page", "state", "deepLink", "version"}
+        self.cpp_locs = {}      # id -> {"version", "locale", "promotionalText", "keywords": [ids]}
+        self.create_visible = True
+        self.prepopulate = False
+
+    def add_page(self, name, state="APPROVED", locales=None, visible=True):
+        page_id = self.next_id("page")
+        self.pages[page_id] = {"name": name, "visible": visible, "template": None}
+        version_id = self._new_version(page_id, state)
+        loc_ids = {}
+        for locale, spec in (locales or {}).items():
+            loc_ids[locale] = self._new_loc(version_id, locale, spec.get("promo", ""), spec.get("keywords", []))
+        return page_id, version_id, loc_ids
+
+    def _new_version(self, page_id, state, deep_link=None):
+        version_id = self.next_id("cv")
+        number = 1 + sum(1 for v in self.cpp_versions.values() if v["page"] == page_id)
+        self.cpp_versions[version_id] = {"page": page_id, "state": state, "deepLink": deep_link, "version": str(number)}
+        return version_id
+
+    def _new_loc(self, version_id, locale, promo, keywords):
+        loc_id = self.next_id("cl")
+        self.cpp_locs[loc_id] = {"version": version_id, "locale": locale, "promotionalText": promo, "keywords": list(keywords)}
+        return loc_id
+
+    def page_named(self, name):
+        return next(pid for pid, p in self.pages.items() if p["name"] == name)
+
+    def route(self, method, parts, query, body):
+        result = super().route(method, parts, query, body)
+        return result if result is not None else self.route_cpp(method, parts, query, body)
+
+    def route_cpp(self, method, parts, query, body):
+        if method == "GET" and len(parts) == 3 and parts[0] == "appStoreVersionLocalizations" and parts[2] == "searchKeywords":
+            return {"data": [{"type": "appKeywords", "id": k} for k in self.pool.get(parts[1], [])]}
+        if method == "GET" and len(parts) == 3 and parts[0] == "appStoreVersionLocalizations" and parts[2] == "appScreenshotSets":
+            return {"data": [{"id": f"set-{t}", "attributes": {"screenshotDisplayType": t}} for t in self.legacy_sets.get(parts[1], [])]}
+        if method == "GET" and len(parts) == 3 and parts[0] == "apps" and parts[2] == "appCustomProductPages":
+            return {"data": [{"id": pid, "type": "appCustomProductPages",
+                              "attributes": {"name": p["name"], "visible": p["visible"], "url": f"https://apps.apple.com/app/id1?ppid={pid}"}}
+                             for pid, p in self.pages.items()]}
+        if method == "POST" and parts == ["appCustomProductPages"]:
+            return self._create_page(body)
+        if method == "PATCH" and parts[:1] == ["appCustomProductPages"]:
+            self.pages[parts[1]]["visible"] = body["data"]["attributes"]["visible"]
+            return {"data": {"id": parts[1]}}
+        if method == "GET" and len(parts) == 3 and parts[0] == "appCustomProductPages" and parts[2] == "appCustomProductPageVersions":
+            return {"data": [{"id": vid, "type": "appCustomProductPageVersions",
+                              "attributes": {"state": v["state"], "deepLink": v["deepLink"], "version": v["version"]}}
+                             for vid, v in self.cpp_versions.items() if v["page"] == parts[1]]}
+        if method == "POST" and parts == ["appCustomProductPageVersions"]:
+            page_id = body["data"]["relationships"]["appCustomProductPage"]["data"]["id"]
+            previous = [vid for vid, v in self.cpp_versions.items() if v["page"] == page_id]
+            version_id = self._new_version(page_id, "PREPARE_FOR_SUBMISSION", body["data"].get("attributes", {}).get("deepLink"))
+            if self.prepopulate and previous:
+                for loc in [l for l in self.cpp_locs.values() if l["version"] == previous[-1]]:
+                    self._new_loc(version_id, loc["locale"], loc["promotionalText"], loc["keywords"])
+            return {"data": {"id": version_id, "type": "appCustomProductPageVersions"}}
+        if method == "PATCH" and parts[:1] == ["appCustomProductPageVersions"]:
+            self.cpp_versions[parts[1]]["deepLink"] = body["data"]["attributes"].get("deepLink")
+            return {"data": {"id": parts[1]}}
+        if method == "GET" and len(parts) == 3 and parts[0] == "appCustomProductPageVersions" and parts[2] == "appCustomProductPageLocalizations":
+            return {"data": [{"id": lid, "type": "appCustomProductPageLocalizations",
+                              "attributes": {"locale": l["locale"], "promotionalText": l["promotionalText"]}}
+                             for lid, l in self.cpp_locs.items() if l["version"] == parts[1]]}
+        if method == "POST" and parts == ["appCustomProductPageLocalizations"]:
+            version_id = body["data"]["relationships"]["appCustomProductPageVersion"]["data"]["id"]
+            attrs = body["data"]["attributes"]
+            return {"data": {"id": self._new_loc(version_id, attrs["locale"], attrs.get("promotionalText", ""), [])}}
+        if method == "PATCH" and parts[:1] == ["appCustomProductPageLocalizations"]:
+            self.cpp_locs[parts[1]]["promotionalText"] = body["data"]["attributes"]["promotionalText"]
+            return {"data": {"id": parts[1]}}
+        if method == "DELETE" and parts[:1] == ["appCustomProductPageLocalizations"] and len(parts) == 2:
+            self.cpp_locs.pop(parts[1])
+            return {}
+        if method == "GET" and len(parts) == 3 and parts[0] == "appCustomProductPageLocalizations" and parts[2] == "searchKeywords":
+            return {"data": [{"type": "appKeywords", "id": k} for k in self.cpp_locs[parts[1]]["keywords"]]}
+        if len(parts) == 4 and parts[0] == "appCustomProductPageLocalizations" and parts[2:] == ["relationships", "searchKeywords"]:
+            ids = [item["id"] for item in body["data"]]
+            keywords = self.cpp_locs[parts[1]]["keywords"]
+            if method == "POST":
+                keywords.extend(i for i in ids if i not in keywords)
+            elif method == "DELETE":
+                self.cpp_locs[parts[1]]["keywords"] = [k for k in keywords if k not in ids]
+            return {}
+        return None
+
+    def _create_page(self, body):
+        data = body["data"]
+        page_id = self.next_id("page")
+        template = data["relationships"].get("appStoreVersionTemplate")
+        self.pages[page_id] = {"name": data["attributes"]["name"], "visible": self.create_visible,
+                               "template": template and template["data"]["id"]}
+        included = body.get("included", [])
+        version_item = next(i for i in included if i["type"] == "appCustomProductPageVersions")
+        assert data["relationships"]["appCustomProductPageVersions"]["data"][0]["id"] == version_item["id"]
+        version_id = self._new_version(page_id, "PREPARE_FOR_SUBMISSION", version_item.get("attributes", {}).get("deepLink"))
+        wanted = {ref["id"] for ref in version_item["relationships"]["appCustomProductPageLocalizations"]["data"]}
+        for item in included:
+            if item["type"] == "appCustomProductPageLocalizations":
+                assert item["id"] in wanted and item["id"].startswith("${")
+                self._new_loc(version_id, item["attributes"]["locale"], item["attributes"].get("promotionalText", ""), [])
+        return {"data": {"id": page_id, "type": "appCustomProductPages", "attributes": {"visible": self.create_visible}}}
