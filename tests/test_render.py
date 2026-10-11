@@ -186,6 +186,23 @@ class HeadlineResolutionTests(unittest.TestCase):
             self.assertEqual((heads["en-GB"]["verb"], heads["en-GB"]["fallback"]), ("SEE IT", False))
             self.assertEqual((heads["de-DE"]["verb"], heads["de-DE"]["fallback"]), ("ERFASSE", True))
 
+    def test_mistyped_named_slot_with_fallback_is_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(tmp, {"from": "headlines.json", "slot": "heor", "fallbackSlot": 0})
+            with self.assertRaisesRegex(render.RenderError, "heor"):
+                render.resolve_headlines(cfg, "d")
+            cfg = self._cfg(tmp, {"from": "headlines.json", "slot": "hero", "fallbackSlot": "trak"})
+            with self.assertRaisesRegex(render.RenderError, "trak"):
+                render.resolve_headlines(cfg, "d")
+
+    def test_named_slot_on_one_entry_only_falls_back_for_the_rest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            heads = render.resolve_headlines(self._cfg(tmp, {"from": "headlines.json", "slot": "hero", "fallbackSlot": 0}), "d")
+            self.assertFalse(heads["en-US"]["fallback"])
+            for locale in ("de-DE", "ar-SA"):
+                self.assertTrue(heads[locale]["fallback"], locale)
+            self.assertEqual(heads["ar-SA"]["verb"], "تتبع")
+
     def test_inline_same(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self._cfg(tmp, {"en-US": ["LOG", "swings"], "en-AU": {"same": "en-US"}})

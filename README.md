@@ -530,7 +530,8 @@ The header and search-results asset is one universal image, exactly
 **5244 × 2950**, cropped by Apple to 21:9 for the product-page header and to
 3:2 for search results. `assets render` draws a headline and one or two device
 captures inside the intersection of both crops, so nothing important is ever
-cut off. `assets.json` lives next to `asokit.json` by default:
+cut off. `assets.json` lives next to `asokit.json` by default (`--assets PATH`
+points elsewhere):
 
 ```json
 {
@@ -543,6 +544,7 @@ cut off. `assets.json` lives next to `asokit.json` by default:
     "ar-SA": {"path": "/System/Library/Fonts/SFArabic.ttf", "variation": "Bold"}
   },
   "noSpaceWrap": ["ja", "zh-Hans", "zh-Hant"],
+  "rtl": ["ar-SA", "he"],
   "type": {"verb": {"size": 360, "min": 220, "step": 10, "lines": 2, "leading": 1.02},
            "descriptor": {"size": 220, "min": 150, "step": 6, "lines": 2, "leading": 1.12},
            "tight": {"verb": 260, "descriptor": 170}},
@@ -563,12 +565,20 @@ cut off. `assets.json` lives next to `asokit.json` by default:
 ```
 
 `type` is optional; the values shown are the defaults. Overrides merge per
-key, so `{"verb": {"size": 400}}` changes the size and keeps the rest. Fonts are keyed by locale with `default` covering the rest.
+key, so `{"verb": {"size": 400}}` changes the size and keeps the rest. Fonts
+are keyed by locale with `default` covering the rest.
 
 Headlines come either inline (`[verb, descriptor]` or `{"same": locale}`) or
 from a headlines file via `from`, where `slot` is an index or a named slot and
-`fallbackSlot` covers locales that lack it. A slot name the file doesn't
-define is an error, not a silent fallback.
+`fallbackSlot` covers locales that lack it. A named slot that some locales
+have and others don't falls back per locale, and the report flags each
+fallback; a slot name that is in neither the file's `_slots` nor on any
+locale — a typo like `"heor"` — is an error, not a silent fallback for every
+locale. The same goes for a misspelt `fallbackSlot`.
+
+Right-to-left layout is per locale. Inline headlines are drawn RTL only when
+their locale is in the top-level `rtl` list; headlines read from a file use
+that locale entry's own `"rtl": true`.
 
 ```bash
 asokit assets render                          # every variant, every locale it can resolve
@@ -588,7 +598,9 @@ stale image can't be uploaded by mistake), and the other locales still render.
 The lint catches what App Review rejects on creatives: prices and offers,
 URLs, rank and award claims, other platforms, medical claims. Languages
 without a word list get a warning, which `--strict-lint` turns into an error;
-`--no-lint` skips it. Right-to-left locales need Pillow built with libraqm.
+`--no-lint` skips it. Right-to-left locales need Pillow built with libraqm;
+without it, a variant with any RTL locale in scope stops before drawing
+anything — the whole variant, not just that locale.
 
 The files must be **8-bit RGB PNGs** (colour type 2) with no alpha channel and
 no `tRNS` chunk, at exactly 5244 × 2950. Rendered output already is; files you
@@ -622,7 +634,8 @@ already in or past review.
 
 Custom product pages can now be assigned keywords, which makes them show up in
 organic search as well as in Apple Ads. `cpp.json` describes the pages you
-want; `cpp push` makes App Store Connect match it.
+want; `cpp push` makes App Store Connect match it. Like `assets.json`, it is
+read from next to `asokit.json` unless `--file PATH` says otherwise.
 
 ```json
 {
@@ -656,8 +669,8 @@ want; `cpp push` makes App Store Connect match it.
 - `screenshots[].order` picks and orders files by name prefix; `creative`
   names a rendered variant, read from `<creative-root>/<variant>/<locale>.png`
   (`--creative-root`, default `assets-out`).
-- `same` copies `promotionalText`, `screenshots`, `creative` and the deep
-  link — **never keywords**. Keyword pools differ by locale, so keywords are
+- `same` copies `promotionalText`, `screenshots` and `creative` — **never
+  keywords** (`deepLink` is set once per page, not per locale). Keyword pools differ by locale, so keywords are
   always explicit.
 - There is no `visible` field on purpose. Visibility changes only through
   `cpp publish`.
@@ -738,9 +751,12 @@ asokit nominations push --apply                       # create or update DRAFTS
 asokit nominations push --submit --name "MoodSync — new product page & localizations" --apply
 ```
 
+`nominations.json` is read from next to `asokit.json` unless `--file PATH`
+says otherwise. `name`, `type`, `description` and `publishStartDate` are
+required; `name` is at most 60 characters and `description` at most 1000.
 `type` is `APP_LAUNCH`, `APP_ENHANCEMENTS` or `NEW_CONTENT`. Dates are
-`YYYY-MM-DD` and must be at least 14 days out — Apple's recommended notice —
-unless `--force`. `relatedApps` defaults to the app in `asokit.json`; if you
+`YYYY-MM-DD`, and `publishStartDate` must be at least 14 days out — Apple's
+recommended notice — unless `--force`. `relatedApps` defaults to the app in `asokit.json`; if you
 set it, it must include that app.
 
 `push` matches nominations by name: missing ones are created as drafts,
@@ -783,8 +799,15 @@ Commit it with your app. App Analytics reports each custom product page
 separately (Acquisition, by product page), but it doesn't tell you when a page
 went live or when its keywords changed. The ledger does: filter Analytics from
 the `publish` timestamp for a page, and compare before and after an
-`add_keywords` or `place` line for that page or locale. `cpp status` prints
-each page's last publish date from the ledger alongside its live state.
+`add_keywords` line (which carries `page_name` and `locale`) for that page.
+Placement lines (`"action": "place"`) are keyed by surface instead: they
+carry `locale`, `surface` (`appStoreVersionLocalization` for the default page,
+`appCustomProductPageLocalization` for a custom product page), `parent_id`
+(that localization's id), `placement_type` and `group`. Match them to a page
+by the `command` (`cpp push`, `assets push`), the locale and the timestamp of
+the same run's `create_page`/`create_version` lines, or look the `parent_id`
+up in App Store Connect. `cpp status` prints each page's last publish date
+from the ledger alongside its live state.
 
 ---
 

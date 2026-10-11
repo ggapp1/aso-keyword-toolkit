@@ -72,6 +72,12 @@ def _from_file(cfg, spec):
         lines = entry.get("h") or target.get("h") or []
         return list(lines[index]) if index < len(lines) else None
 
+    entries = [entry for locale, entry in data.items() if not locale.startswith("_") and isinstance(entry, dict)]
+    for key in ("slot", "fallbackSlot"):
+        slot = spec.get(key)
+        if isinstance(slot, str) and slot not in names and not any(slot in entry for entry in entries):
+            raise RenderError(f"{key} {slot!r} is neither in {spec['from']}'s _slots nor a key on any locale — check the slot name")
+
     out = {}
     for locale, entry in data.items():
         if locale.startswith("_") or not isinstance(entry, dict):
