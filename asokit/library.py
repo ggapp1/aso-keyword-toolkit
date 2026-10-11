@@ -250,3 +250,225 @@ class Uploader:
             result = dict(base, asset=asset, status="uploaded", specId=None)
         self.cache[key] = result
         return result
+
+
+PARENTS = {
+    "appStoreVersionLocalization": "appStoreVersionLocalizations",
+    "appCustomProductPageLocalization": "appCustomProductPageLocalizations",
+}
+VERSION_PLACEABLE = frozenset({"PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED", "REJECTED", "METADATA_REJECTED", "INVALID_BINARY"})
+
+
+class PartialPlacement(asc.ASCError):
+    pass
+
+
+def surface_placements(parent_kind, parent_id, bearer):
+    """Every placement on one localization, with each placement's asset hash."""
+    url = f"/{PARENTS[parent_kind]}/{parent_id}/placements?include=image&sort=placementGroupPosition&limit=200"
+    rows, images = [], {}
+    while url:
+        page = asc.call("GET", url, bearer)
+        rows.extend(page.get("data", []))
+        for item in page.get("included", []) or []:
+            if item.get("type") == "appAssetLibraryImages":
+                images[item["id"]] = item.get("attributes") or {}
+        url = (page.get("links") or {}).get("next")
+    placements = []
+    for row in rows:
+        attrs = row.get("attributes") or {}
+        image = (((row.get("relationships") or {}).get("image") or {}).get("data") or {}).get("id")
+        placements.append({"id": row["id"], "type": attrs.get("placementType"), "group": attrs.get("placementGroup"),
+                           "state": attrs.get("state"), "asset": image,
+                           "sha": sha_of((images.get(image) or {}).get("referenceName"))})
+    return placements
+
+
+def place(asset_id, placement_type, group, parent_kind, parent_id, bearer):
+    return asc.call("POST", "/appAssetLibraryPlacements", bearer, {"data": {
+        "type": "appAssetLibraryPlacements",
+        "attributes": {"placementType": placement_type, "placementGroup": group},
+        "relationships": {
+            "image": {"data": {"type": "appAssetLibraryImages", "id": asset_id}},
+            parent_kind: {"data": {"type": PARENTS[parent_kind], "id": parent_id}},
+        },
+    }})["data"]["id"]
+
+
+def unplace(placement_id, bearer):
+    asc.call("DELETE", f"/appAssetLibraryPlacements/{placement_id}", bearer)
+
+
+def order(group, placement_ids, parent_kind, parent_id, bearer):
+    asc.call("POST", "/appAssetLibraryPlacementOrderingRequests", bearer, {"data": {
+        "type": "appAssetLibraryPlacementOrderingRequests",
+        "attributes": {"placementGroup": group},
+        "relationships": {
+            "orderedPlacements": {"data": [{"type": "appAssetLibraryPlacements", "id": pid} for pid in placement_ids]},
+            parent_kind: {"data": {"type": PARENTS[parent_kind], "id": parent_id}},
+        },
+    }})
+
+
+def _key(row):
+    return row.get("sha") or row.get("asset")
+
+
+def replace_group(desired, placement_type, group, parent_kind, parent_id, max_count, bearer, apply, current):
+    """Make one placement group hold exactly `desired`, in order, with minimal writes.
+
+    Placements that already show a desired asset are kept. Missing ones are
+    placed BEFORE extras are removed whenever the group's limit allows, so an
+    abort never leaves the surface emptier than it started; at the limit the
+    extras go first and an abort reports the gap.
+    """
+    pool = list(current)
+    final = []
+    for want in desired:
+        match = next((row for row in pool if _key(row) == _key(want)), None)
+        if match:
+            pool.remove(match)
+        final.append([match["id"] if match else None, want])
+    extras = pool
+    missing = [slot for slot in final if slot[0] is None]
+    action = {"type": placement_type, "group": group, "parent_id": parent_id, "place": len(missing), "unplace": len(extras)}
+    if not missing and not extras:
+        action["mode"] = "unchanged" if [s[0] for s in final] == [row["id"] for row in current] else "reorder"
+    else:
+        place_first = max_count is None or len(current) + len(missing) <= max_count
+        action["mode"] = "place-first" if place_first else "unplace-first"
+    if not apply or action["mode"] == "unchanged":
+        return action
+
+    placed = 0
+    try:
+        if action["mode"] == "unplace-first":
+            for row in extras:
+                unplace(row["id"], bearer)
+        for slot in missing:
+            slot[0] = place(slot[1]["asset"], placement_type, group, parent_kind, parent_id, bearer)
+            placed += 1
+        if action["mode"] == "place-first":
+            for row in extras:
+                unplace(row["id"], bearer)
+    except asc.ASCError as error:
+        raise PartialPlacement(
+            f"{parent_id} {group}: {placed} of {len(missing)} new placements made before the failure — "
+            f"the group may be incomplete; re-run to converge.\n{error}"
+        ) from error
+    ids = [slot[0] for slot in final]
+    if len(ids) > 1:
+        order(group, ids, parent_kind, parent_id, bearer)
+        actual = [row["id"] for row in surface_placements(parent_kind, parent_id, bearer) if row["group"] == group]
+        if actual != ids:
+            raise asc.ASCError(f"{parent_id} {group}: order did not stick (got {actual}, wanted {ids})")
+    return action
+
+
+def sync_groups(requests, catalog, feature, library, bearer, apply, ledger=None, command="", progress=None):
+    """Upload/reuse every file, wait once, then replace each request's groups.
+
+    A request is a dict:
+      locale, parent_kind, parent_id (None for a surface that doesn't exist yet — dry run only),
+      placement_types: [type, ...]  (one asset sequence is placed under each type),
+      category: CREATIVE or MEDIA,
+      files: [(file_name, bytes), ...]  OR  assets: [{"asset", "sha", "specId"}] (re-place existing assets),
+      display_class: optional tie-breaker when a spec maps to several groups (e.g. Watch 410×502),
+      groups: optional explicit group list (mirroring copies the source group).
+    Phase 1 (no surface writes): uploads + one processing wait + spec checks.
+    Phase 2: replace_group per (request, type, group).
+    """
+    uploader = Uploader(library, bearer, apply)
+    for request in requests:
+        if "assets" not in request:
+            request["assets"] = [uploader.ensure(name, data, request["category"]) for name, data in request["files"]]
+    if apply and uploader.new_ids:
+        states = wait_processed(library, uploader.new_ids, bearer)
+        bad = {i: s for i, s in states.items() if s.get("state") not in PROCESSED}
+        if bad:
+            details = ", ".join(f"{i}: {s.get('state')} {s.get('stateDetails') or ''}".strip() for i, s in bad.items())
+            raise asc.ASCError(f"Apple did not accept {len(bad)} upload(s) — nothing placed. {details}")
+        for request in requests:
+            for asset in request["assets"]:
+                if asset["asset"] in states:
+                    asset["specId"] = states[asset["asset"]]["specId"]
+
+    plans = []
+    for request in requests:
+        for ptype in request["placement_types"]:
+            if not catalog.supports(feature, ptype):
+                plans.append((request, ptype, None))
+                continue
+            groups = request.get("groups") or _resolve_groups(catalog, feature, ptype, request)
+            for group in groups:
+                plans.append((request, ptype, group))
+
+    actions, surfaces = [], {}
+    for request, ptype, group in plans:
+        if group is None:
+            actions.append({"locale": request["locale"], "type": ptype, "group": None, "mode": "unsupported",
+                            "parent_id": request["parent_id"], "place": 0, "unplace": 0})
+            continue
+        parent = request["parent_id"]
+        if parent not in surfaces:
+            surfaces[parent] = surface_placements(request["parent_kind"], parent, bearer) if parent else []
+        current = [row for row in surfaces[parent] if row["type"] == ptype and row["group"] == group]
+        desired = [{"asset": a["asset"], "sha": a["sha"]} for a in request["assets"]]
+        action = replace_group(desired, ptype, group, request["parent_kind"], parent,
+                               catalog.max_count(feature, ptype, group), bearer, apply and parent is not None, current)
+        action["locale"] = request["locale"]
+        actions.append(action)
+        if apply and ledger and action["mode"] != "unchanged":
+            ledger.record(command, "place", locale=request["locale"], surface=request["parent_kind"], parent_id=parent,
+                          placement_type=ptype, group=group, asset_sha=[a["sha"] for a in request["assets"]], mode=action["mode"])
+        if progress:
+            progress(action)
+    return actions
+
+
+def _resolve_groups(catalog, feature, ptype, request):
+    """Groups every asset of the request can go to; screenshots need exactly one."""
+    per_asset = []
+    for asset in request["assets"]:
+        if asset.get("specId"):
+            groups = catalog.groups_for_spec(feature, ptype, asset["specId"])
+            if not groups:
+                raise asc.ASCError(f"{request['locale']}: {asset['name']} matched spec {asset['specId']}, "
+                                   f"which has no {ptype} group under {feature}")
+        else:   # dry run, or reused row without a spec: infer from dimensions
+            groups = []
+            for spec in catalog.specs_matching(ptype, asset["width"], asset["height"]):
+                groups += [g for g in catalog.groups_for_spec(feature, ptype, spec["specId"]) if g not in groups]
+            if not groups:
+                raise asc.ASCError(f"{request['locale']}: {asset['name']} is {asset['width']}×{asset['height']}; "
+                                   f"no {ptype} spec under {feature} accepts that size")
+        per_asset.append(groups)
+    common = [g for g in per_asset[0] if all(g in groups for groups in per_asset[1:])] if per_asset else []
+    if request.get("display_class"):
+        common = [g for g in common if catalog.display_class(g) == request["display_class"]] or common
+    if ptype == SCREENSHOT and len(common) != 1:
+        raise asc.ASCError(f"{request['locale']}: screenshots map to {len(common)} groups {common}; pass a display class")
+    return common
+
+
+EXPERIMENT_REVIEW = frozenset({"READY_FOR_REVIEW", "WAITING_FOR_REVIEW", "IN_REVIEW"})
+EXPERIMENT_LIVE = frozenset({"ACCEPTED", "APPROVED"})
+
+
+def active_experiment(app_id, bearer):
+    """Name of a product page optimization test that is in review or running, else None.
+
+    Field reports say a running test blocks placements on the default page.
+    Apple has no RUNNING state: running = approved/accepted, started, not ended.
+    """
+    states = ",".join(sorted(EXPERIMENT_REVIEW | EXPERIMENT_LIVE))
+    rows = asc.call_all("GET", f"/apps/{app_id}/appStoreVersionExperimentsV2?filter[state]={states}&limit=200", bearer)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    for row in rows:
+        attrs = row.get("attributes") or {}
+        state = attrs.get("state")
+        if state in EXPERIMENT_REVIEW:
+            return attrs.get("name") or row["id"]
+        if state in EXPERIMENT_LIVE and (attrs.get("startDate") or "") <= now and not attrs.get("endDate"):
+            return attrs.get("name") or row["id"]
+    return None

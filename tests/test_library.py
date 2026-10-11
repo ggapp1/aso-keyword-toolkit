@@ -1,7 +1,7 @@
 # tests/test_library.py
 import unittest
 
-from asokit import library
+from asokit import asc, library
 from tests.fakes import REFDATA, FakeConnect, install
 from tests.test_creative import png_bytes
 
@@ -176,3 +176,138 @@ class ReuseRulingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReplaceGroupTests(unittest.TestCase):
+    def setUp(self):
+        self.fake = install(self, FakeConnect())
+        self.fake.default_spec = "S_1290"
+        self.uploader = library.Uploader("lib1", "t", apply=True)
+
+    def asset(self, name):
+        return self.uploader.ensure(name, png_bytes(1290, 2796) + name.encode(), library.MEDIA)
+
+    def current(self):
+        return [p for p in library.surface_placements("appStoreVersionLocalization", "vl-en", "t") if p["group"] == "G_IPHONE_L"]
+
+    def replace(self, names, max_count=10):
+        desired = [{"asset": a["asset"], "sha": a["sha"]} for a in (self.asset(n) for n in names)]
+        return library.replace_group(desired, library.SCREENSHOT, "G_IPHONE_L", "appStoreVersionLocalization", "vl-en",
+                                     max_count, "t", apply=True, current=self.current())
+
+    def test_first_fill_then_unchanged_is_zero_writes(self):
+        self.replace(["a.png", "b.png"])
+        self.assertEqual(self.fake.group("vl-en", "G_IPHONE_L"), ["a.png", "b.png"])
+        before = len(self.fake.writes())
+        result = self.replace(["a.png", "b.png"])
+        self.assertEqual(result["mode"], "unchanged")
+        self.assertEqual(len(self.fake.writes()), before)
+
+    def test_reorder_only_issues_one_ordering_request(self):
+        self.replace(["a.png", "b.png"])
+        before = len(self.fake.writes())
+        result = self.replace(["b.png", "a.png"])
+        self.assertEqual(result["mode"], "reorder")
+        self.assertEqual(self.fake.group("vl-en", "G_IPHONE_L"), ["b.png", "a.png"])
+        self.assertEqual(len(self.fake.writes()), before + 1)
+
+    def test_place_first_under_capacity_keeps_shared_assets(self):
+        self.replace(["a.png", "b.png"])
+        c, a = self.asset("c.png"), self.asset("a.png")
+        start = len(self.fake.log)
+        result = library.replace_group([{"asset": c["asset"], "sha": c["sha"]}, {"asset": a["asset"], "sha": a["sha"]}],
+                                       library.SCREENSHOT, "G_IPHONE_L", "appStoreVersionLocalization", "vl-en",
+                                       10, "t", apply=True, current=self.current())
+        self.assertEqual(result["mode"], "place-first")
+        self.assertEqual((result["place"], result["unplace"]), (1, 1))
+        self.assertEqual(self.fake.group("vl-en", "G_IPHONE_L"), ["c.png", "a.png"])
+        tail = [entry[:2] for entry in self.fake.log[start:]]
+        first_place = tail.index(("POST", "/appAssetLibraryPlacements"))
+        first_delete = next(i for i, entry in enumerate(tail) if entry[0] == "DELETE")
+        self.assertLess(first_place, first_delete)
+
+    def test_unplace_first_at_capacity(self):
+        self.replace(["a.png"], max_count=1)
+        result = self.replace(["b.png"], max_count=1)
+        self.assertEqual(result["mode"], "unplace-first")
+        self.assertEqual(self.fake.group("vl-en", "G_IPHONE_L"), ["b.png"])
+
+    def test_abort_between_unplace_and_place_reports_gap(self):
+        self.replace(["a.png"], max_count=1)
+        b = self.asset("b.png")
+        self.fake.fail_on = ("POST", "/appAssetLibraryPlacements")
+        with self.assertRaises(library.PartialPlacement) as caught:
+            library.replace_group([{"asset": b["asset"], "sha": b["sha"]}], library.SCREENSHOT, "G_IPHONE_L",
+                                  "appStoreVersionLocalization", "vl-en", 1, "t", apply=True, current=self.current())
+        self.assertIn("0 of 1", str(caught.exception))
+
+    def test_never_deletes_assets(self):
+        self.replace(["a.png", "b.png"])
+        self.replace(["c.png"])
+        self.assertFalse(any(e[0] == "DELETE" and "/appAssetLibraryImages" in e[1] for e in self.fake.log))
+
+
+class SyncGroupsTests(unittest.TestCase):
+    def setUp(self):
+        self.fake = install(self, FakeConnect())
+        self.catalog = library.Catalog.fetch("t")
+
+    def creative_request(self, locale, parent):
+        return {"locale": locale, "parent_kind": "appStoreVersionLocalization", "parent_id": parent,
+                "placement_types": [library.HEADER, library.SEARCH], "category": library.CREATIVE,
+                "files": [(f"{locale}.png", png_bytes(5244, 2950) + locale.encode())]}
+
+    def test_creative_lands_in_header_and_search(self):
+        actions = library.sync_groups([self.creative_request("en-US", "vl-en"), self.creative_request("de-DE", "vl-de")],
+                                      self.catalog, "APP_STORE_VERSIONS", "lib1", "t", apply=True)
+        self.assertEqual(self.fake.group("vl-en", "G_HEADER"), ["en-US.png"])
+        self.assertEqual(self.fake.group("vl-en", "G_SEARCH"), ["en-US.png"])
+        self.assertEqual(self.fake.group("vl-de", "G_HEADER"), ["de-DE.png"])
+        self.assertEqual({a["group"] for a in actions}, {"G_HEADER", "G_SEARCH"})
+
+    def test_uploads_all_before_any_placement(self):
+        library.sync_groups([self.creative_request("en-US", "vl-en"), self.creative_request("de-DE", "vl-de")],
+                            self.catalog, "APP_STORE_VERSIONS", "lib1", "t", apply=True)
+        kinds = [e[1] for e in self.fake.log if e[0] == "POST"]
+        last_upload = max(i for i, k in enumerate(kinds) if k == "/appAssetLibraryImages")
+        first_place = min(i for i, k in enumerate(kinds) if k == "/appAssetLibraryPlacements")
+        self.assertLess(last_upload, first_place)
+
+    def test_processing_failure_places_nothing(self):
+        self.fake.after_commit = "FAILED"
+        with self.assertRaises(asc.ASCError):
+            library.sync_groups([self.creative_request("en-US", "vl-en")], self.catalog, "APP_STORE_VERSIONS", "lib1", "t", apply=True)
+        self.assertFalse(any(e[:2] == ("POST", "/appAssetLibraryPlacements") for e in self.fake.log))
+
+    def test_spec_mismatch_is_reported(self):
+        self.fake.spec_by_file = {"en-US.png": "S_HEADER"}   # Apple matched the file to the header-only spec
+        with self.assertRaises(asc.ASCError) as caught:
+            library.sync_groups([self.creative_request("en-US", "vl-en")], self.catalog, "APP_STORE_VERSIONS", "lib1", "t", apply=True)
+        self.assertIn("S_HEADER", str(caught.exception))
+
+    def test_dry_run_plans_new_parent_without_reads(self):
+        request = dict(self.creative_request("en-US", None))
+        actions = library.sync_groups([request], self.catalog, "CUSTOM_PRODUCT_PAGES", "lib1", "t", apply=False)
+        self.assertEqual(len(actions), 2)
+        self.assertEqual(self.fake.writes(), [])
+
+    def test_watch_ambiguity_resolved_by_display_class(self):
+        request = {"locale": "en-US", "parent_kind": "appStoreVersionLocalization", "parent_id": "vl-en",
+                   "placement_types": [library.SCREENSHOT], "category": library.MEDIA, "display_class": "WATCH_ULTRA",
+                   "files": [("w.png", png_bytes(410, 502))]}
+        self.fake.default_spec = "S_410"
+        library.sync_groups([request], self.catalog, "APP_STORE_VERSIONS", "lib1", "t", apply=True)
+        self.assertEqual(self.fake.group("vl-en", "G_WATCH_U"), ["w.png"])
+        self.assertEqual(self.fake.group("vl-en", "G_WATCH_10"), [])
+
+
+class ExperimentGuardTests(unittest.TestCase):
+    def test_running_and_in_review_experiments_block(self):
+        fake = install(self, FakeConnect())
+        self.assertIsNone(library.active_experiment("1", "t"))
+        fake.experiments = [{"id": "e1", "attributes": {"name": "Icon test", "state": "APPROVED", "startDate": "2026-01-01T00:00:00Z", "endDate": None}}]
+        self.assertEqual(library.active_experiment("1", "t"), "Icon test")
+        fake.experiments = [{"id": "e1", "attributes": {"name": "Old", "state": "APPROVED", "startDate": "2026-01-01T00:00:00Z", "endDate": "2026-02-01T00:00:00Z"}}]
+        self.assertIsNone(library.active_experiment("1", "t"))
+        fake.experiments = [{"id": "e2", "attributes": {"name": "Queued", "state": "WAITING_FOR_REVIEW"}}]
+        self.assertEqual(library.active_experiment("1", "t"), "Queued")
