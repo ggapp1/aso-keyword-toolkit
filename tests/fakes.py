@@ -413,3 +413,31 @@ class FakeCppConnect(FakeConnect):
                 assert item["id"] in wanted and item["id"].startswith("${")
                 self._new_loc(version_id, item["attributes"]["locale"], item["attributes"].get("promotionalText", ""), [])
         return {"data": {"id": page_id, "type": "appCustomProductPages", "attributes": {"visible": self.create_visible}}}
+
+
+class FakeNominationConnect(FakeConnect):
+    def __init__(self):
+        super().__init__()
+        self.nominations = {}   # id -> attributes (incl. "state")
+
+    def route(self, method, parts, query, body):
+        if parts[:1] == ["nominations"]:
+            if method == "GET" and len(parts) == 1:
+                assert "filter[state]" in query, "GET /v1/nominations requires filter[state]"
+                wanted = set(query["filter[state]"].split(","))
+                return {"data": [{"id": nid, "type": "nominations", "attributes": dict(attrs)}
+                                 for nid, attrs in self.nominations.items() if attrs["state"] in wanted]}
+            if method == "POST":
+                attrs = dict(body["data"]["attributes"])
+                assert all(isinstance(a["id"], str) for a in body["data"]["relationships"]["relatedApps"]["data"])
+                attrs["state"] = "SUBMITTED" if attrs.pop("submitted") else "DRAFT"
+                nid = self.next_id("nom")
+                self.nominations[nid] = attrs
+                return {"data": {"id": nid, "type": "nominations", "attributes": attrs}}
+            if method == "PATCH":
+                attrs = dict(body["data"]["attributes"])
+                if attrs.pop("submitted", False):
+                    self.nominations[parts[1]]["state"] = "SUBMITTED"
+                self.nominations[parts[1]].update(attrs)
+                return {"data": {"id": parts[1]}}
+        return super().route(method, parts, query, body)

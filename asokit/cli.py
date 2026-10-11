@@ -21,6 +21,8 @@
   asokit cpp push [--apply]            converge pages to cpp.json (created hidden)
   asokit cpp submit --pages N [--apply]   send page versions to App Review
   asokit cpp publish --pages N [--apply]  make approved pages visible (routing goes live)
+  asokit nominations check [--force]   validate nominations.json
+  asokit nominations push [--apply] [--submit --name N]  create/update drafts; submit one
 """
 
 import argparse
@@ -38,6 +40,7 @@ from . import (
     ledger as ledger_module,
     library,
     metadata as meta,
+    nominations,
     packing,
     products as prod,
     report,
@@ -1362,6 +1365,34 @@ def cmd_cpp_submit(args):
     print("submitted for review." if result["submitted"] else "\nDRY RUN — nothing written. Re-run with --apply to submit.")
 
 
+def _nominations_doc(args):
+    path = Path(args.file) if args.file else _config_path(args).resolve().parent / "nominations.json"
+    if not path.exists():
+        sys.exit(f"no {path}")
+    return nominations.load(path)
+
+
+def cmd_nominations_check(args):
+    problems, warnings = nominations.check(_nominations_doc(args), force=args.force)
+    _report(problems, warnings)
+    print("ok")
+
+
+def cmd_nominations_push(args):
+    doc = _nominations_doc(args)
+    if args.submit and not (args.name and args.apply):
+        sys.exit("--submit needs --name NAME and --apply — nominations are submitted one at a time")
+    problems, warnings = nominations.check(doc, force=args.force)
+    _report(problems, warnings)
+    _, app_id = _require_app_id(args)
+    bearer = _bearer()
+    if asc.editable_version(app_id, bearer) is None:
+        print("  warning: no App Store version in preparation — make sure the nominated release can ship by its date")
+    book = ledger_module.for_config(_config_path(args), args.apply)
+    nominations.push(app_id, doc, bearer, args.apply, submit_name=args.name if args.submit else None, ledger=book)
+    print("applied." if args.apply else "\nDRY RUN — nothing written. Re-run with --apply.")
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="asokit",
@@ -1597,6 +1628,21 @@ def build_parser():
     cpp_common(cpp_submit, apply=True)
     cpp_submit.add_argument("--pages", help="comma-separated page names (required)")
     cpp_submit.set_defaults(func=cmd_cpp_submit)
+
+    nominations_command = subcommands.add_parser("nominations", help="App Store featuring nominations")
+    nominations_sub = nominations_command.add_subparsers(dest="nominations_command", required=True)
+    nominations_check = nominations_sub.add_parser("check", help="validate nominations.json")
+    nominations_check.add_argument("--file")
+    nominations_check.add_argument("--force", action="store_true", help="allow < 14 days' notice")
+    nominations_check.set_defaults(func=cmd_nominations_check)
+    nominations_push = nominations_sub.add_parser("push", help="create/update drafts (dry run unless --apply)")
+    nominations_push.add_argument("--file")
+    nominations_push.add_argument("--app-id")
+    nominations_push.add_argument("--apply", action="store_true")
+    nominations_push.add_argument("--force", action="store_true")
+    nominations_push.add_argument("--submit", action="store_true", help="submit the nomination named by --name")
+    nominations_push.add_argument("--name")
+    nominations_push.set_defaults(func=cmd_nominations_push)
     return parser
 
 
