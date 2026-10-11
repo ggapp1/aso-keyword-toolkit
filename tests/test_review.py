@@ -43,5 +43,30 @@ class SubmitTests(unittest.TestCase):
         self.assertEqual(self.fake.submissions["s0"]["state"], "WAITING_FOR_REVIEW")
 
 
+class PreflightTests(unittest.TestCase):
+    def setUp(self):
+        self.fake = install(self, FakeConnect())
+
+    def test_no_open_submission_passes(self):
+        self.assertIsNone(review.preflight("1", "t", {"appAssetLibraryImage"}))
+        self.assertEqual(self.fake.writes(), [])
+
+    def test_in_flight_blocks(self):
+        self.fake.submissions["s0"] = {"state": "UNRESOLVED_ISSUES", "items": []}
+        with self.assertRaises(review.SubmissionBlocked):
+            review.preflight("1", "t", {"appAssetLibraryImage"})
+
+    def test_draft_with_disallowed_relationship_blocks(self):
+        self.fake.submissions["s0"] = {"state": "READY_FOR_REVIEW", "items": [CPP_ITEM]}
+        with self.assertRaises(review.SubmissionBlocked) as caught:
+            review.preflight("1", "t", {"appAssetLibraryImage"})
+        self.assertIn("appCustomProductPageVersion", str(caught.exception))
+
+    def test_draft_with_allowed_items_passes(self):
+        self.fake.submissions["s0"] = {"state": "READY_FOR_REVIEW", "items": [CPP_ITEM]}
+        self.assertEqual(review.preflight("1", "t", {"appCustomProductPageVersion"}), "s0")
+        self.assertEqual(self.fake.writes(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

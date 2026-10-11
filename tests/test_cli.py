@@ -136,7 +136,7 @@ from tests.fakes import FakeConnect, install
 from tests.test_creative import png_bytes
 
 
-class AssetsCommands(unittest.TestCase):
+class AssetsFixture(unittest.TestCase):
     def setUp(self):
         self.fake = install(self, FakeConnect())
         self.root = Path(tempfile.mkdtemp())
@@ -155,6 +155,8 @@ class AssetsCommands(unittest.TestCase):
             cli.main(["--config", str(self.root / "asokit.json"), *argv])
         return buffer.getvalue()
 
+
+class AssetsCommands(AssetsFixture):
     def test_push_default_dry_run(self):
         text = self.run_cli("assets", "push", str(self.out), "--target", "default")
         self.assertIn("DRY RUN", text)
@@ -186,3 +188,71 @@ class AssetsCommands(unittest.TestCase):
     def test_status_catalog_dump(self):
         text = self.run_cli("assets", "status", "--catalog")
         self.assertIn("PRODUCT_PAGE_HEADER_ASSET", text)
+
+
+from asokit import library as library_module
+
+
+class AssetsSubmitCommand(AssetsFixture):
+    """`assets submit`: guards first, wait on every unprocessed asset, skip assets already in review."""
+
+    def seed_image(self, locale, state, spec="S_UNIV"):
+        data = (self.out / f"{locale}.png").read_bytes()
+        reference, _ = library_module.reference_name(f"{locale}.png", data)
+        image_id = f"seed-{locale}"
+        self.fake.images[image_id] = {"fileName": f"{locale}.png", "fileSize": len(data), "category": library_module.CREATIVE,
+                                      "referenceName": reference, "state": state, "specId": spec}
+        return image_id
+
+    def image_posts(self):
+        return [e for e in self.fake.writes() if e[:2] == ("POST", "/appAssetLibraryImages")]
+
+    def test_foreign_draft_stops_before_any_upload(self):
+        self.fake.submissions["s0"] = {"state": "READY_FOR_REVIEW", "items": [("appStoreVersion", "appStoreVersions", "v1")]}
+        with self.assertRaises(SystemExit) as caught:
+            self.run_cli("assets", "submit", str(self.out), "--apply")
+        self.assertIn("appStoreVersion", str(caught.exception))
+        self.assertEqual(self.image_posts(), [])
+        self.assertEqual(self.fake.submissions["s0"]["state"], "READY_FOR_REVIEW")
+
+    def test_in_flight_submission_stops_before_any_upload(self):
+        self.fake.submissions["s0"] = {"state": "IN_REVIEW", "items": []}
+        with self.assertRaises(SystemExit):
+            self.run_cli("assets", "submit", str(self.out), "--apply")
+        self.assertEqual(self.image_posts(), [])
+
+    def test_waits_on_reused_unprocessed_assets_and_fails_on_bad_state(self):
+        seeded = self.seed_image("en-US", "UPLOAD_COMPLETE", spec=None)
+        with mock.patch.object(library_module, "wait_processed",
+                               return_value={seeded: {"state": "FAILED", "specId": None}}) as waited:
+            with self.assertRaises(SystemExit) as caught:
+                self.run_cli("assets", "submit", str(self.out), "--locales", "en-US", "--apply")
+        self.assertEqual(waited.call_args.args[1], [seeded])
+        self.assertIn(seeded, str(caught.exception))
+        self.assertEqual(self.fake.submissions, {})
+
+    def test_reused_asset_already_in_review_is_skipped(self):
+        self.seed_image("en-US", "IN_REVIEW")
+        text = self.run_cli("assets", "submit", str(self.out), "--apply")
+        self.assertIn("already IN_REVIEW", text)
+        (sub,) = self.fake.submissions.values()
+        ids = [rid for _, _, rid in sub["items"]]
+        self.assertNotIn("seed-en-US", ids)
+        self.assertEqual(len(ids), 1)
+        self.assertEqual(sub["state"], "WAITING_FOR_REVIEW")
+
+    def test_nothing_left_to_submit_exits_cleanly(self):
+        self.seed_image("en-US", "APPROVED")
+        self.seed_image("de-DE", "WAITING_FOR_REVIEW")
+        text = self.run_cli("assets", "submit", str(self.out), "--apply")
+        self.assertIn("nothing to submit", text)
+        self.assertEqual(self.fake.writes(), [])
+
+
+class AssetsStatusLabels(AssetsFixture):
+    def test_status_labels_header_and_search(self):
+        self.run_cli("assets", "push", str(self.out), "--target", "default", "--apply")
+        text = self.run_cli("assets", "status")
+        self.assertIn("header:", text)
+        self.assertIn("search:", text)
+        self.assertNotIn("product:", text)

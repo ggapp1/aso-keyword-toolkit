@@ -34,17 +34,43 @@ def _items(submission_id, bearer):
     return found
 
 
-def submit(app_id, items, bearer, apply, ledger=None, command=""):
-    planned = list(dict.fromkeys(tuple(i) for i in items))
-    if not planned:
-        raise SubmissionBlocked("nothing to submit")
+def _open_drafts(app_id, bearer):
+    """READY_FOR_REVIEW drafts; raises SubmissionBlocked if a submission is in flight."""
     states = ",".join(OPEN)
     open_rows = asc.call_all("GET", f"/reviewSubmissions?filter[app]={app_id}&filter[platform]=IOS&filter[state]={states}&limit=200", bearer)
     flying = [r for r in open_rows if (r.get("attributes") or {}).get("state") in IN_FLIGHT]
     if flying:
         raise SubmissionBlocked(f"a review submission is in flight ({flying[0]['id']}, {flying[0]['attributes']['state']}) — "
                                 "wait for it to finish, then re-run")
-    drafts = [r for r in open_rows if (r.get("attributes") or {}).get("state") == "READY_FOR_REVIEW"]
+    return [r for r in open_rows if (r.get("attributes") or {}).get("state") == "READY_FOR_REVIEW"]
+
+
+def preflight(app_id, bearer, allowed_relationships):
+    """Read-only early guard, run before any upload.
+
+    Raises SubmissionBlocked when a submission is in flight or the open draft
+    holds an item whose relationship the caller could never plan (e.g. the app
+    version). Returns the draft id, or None. submit() still runs the exact
+    item-by-item check.
+    """
+    drafts = _open_drafts(app_id, bearer)
+    if not drafts:
+        return None
+    submission = drafts[0]["id"]
+    allowed = set(allowed_relationships)
+    foreign = [i for i in _items(submission, bearer) if i[0] not in allowed]
+    if foreign:
+        listed = ", ".join(f"{rel} {rid}" for rel, _, rid in foreign)
+        raise SubmissionBlocked(f"draft submission {submission} already holds other items ({listed}). "
+                                "Submit or clear it in App Store Connect first — asokit will not submit them for you.")
+    return submission
+
+
+def submit(app_id, items, bearer, apply, ledger=None, command=""):
+    planned = list(dict.fromkeys(tuple(i) for i in items))
+    if not planned:
+        raise SubmissionBlocked("nothing to submit")
+    drafts = _open_drafts(app_id, bearer)
     submission, existing = None, []
     if drafts:
         submission = drafts[0]["id"]

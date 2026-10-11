@@ -132,6 +132,7 @@ REUSABLE = frozenset({"UPLOAD_COMPLETE", "COMPLETE", "PREPARE_FOR_SUBMISSION", "
 PROCESSED = REUSABLE - {"UPLOAD_COMPLETE"}
 TERMINAL_BAD = frozenset({"FAILED", "REJECTED", "ARCHIVED"})
 REVIEW_PASSED = frozenset({"ACCEPTED", "APPROVED"})
+IN_OR_PAST_REVIEW = frozenset({"WAITING_FOR_REVIEW", "IN_REVIEW"}) | REVIEW_PASSED
 TIMEOUT = "TIMEOUT"
 
 
@@ -241,13 +242,14 @@ class Uploader:
             return dict(self.cache[key], **{k: base[k] for k in ("name",)})
         row = find_reusable(self.library, reference, category, self.bearer)
         if row:
-            result = dict(base, asset=row["id"], status="reused", specId=row["attributes"].get("specId"))
+            result = dict(base, asset=row["id"], status="reused", specId=row["attributes"].get("specId"),
+                          state=row["attributes"].get("state"))
         elif not self.apply:
-            result = dict(base, asset=f"new:{sha}", status="would-upload", specId=None)
+            result = dict(base, asset=f"new:{sha}", status="would-upload", specId=None, state=None)
         else:
             asset = upload_image(self.library, file_name, data, category, reference, self.bearer)
             self.new_ids.append(asset)
-            result = dict(base, asset=asset, status="uploaded", specId=None)
+            result = dict(base, asset=asset, status="uploaded", specId=None, state=None)
         self.cache[key] = result
         return result
 

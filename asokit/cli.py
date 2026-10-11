@@ -977,6 +977,9 @@ def cmd_assets_render(args):
         sys.exit(1)
 
 
+_SURFACE_LABELS = {library.HEADER: "header", library.SEARCH: "search"}
+
+
 def cmd_assets_status(args):
     _, app_id = _require_app_id(args)
     bearer = _bearer()
@@ -1001,7 +1004,7 @@ def cmd_assets_status(args):
     for locale, loc_id in sorted(asc._localizations(version["id"], bearer).items()):
         rows = [p for p in library.surface_placements("appStoreVersionLocalization", loc_id, bearer)
                 if p["type"] in (library.HEADER, library.SEARCH)]
-        line = ", ".join(f"{p['type'].split('_')[0].lower()}:{p['state']}" for p in rows) or "(no header/search assets)"
+        line = ", ".join(f"{_SURFACE_LABELS[p['type']]}:{p['state']}" for p in rows) or "(no header/search assets)"
         print(f"  {locale:<8} {line}")
 
 
@@ -1066,17 +1069,38 @@ def cmd_assets_submit(args):
     _, app_id = _require_app_id(args)
     plan = _creative_plan(args)
     bearer = _bearer()
+    # Read-only guard before any upload (and the up-to-15-minute wait):
+    # submit() re-checks item by item, but a doomed run should cost nothing.
+    try:
+        review.preflight(app_id, bearer, {"appAssetLibraryImage"})
+    except review.SubmissionBlocked as error:
+        sys.exit(str(error))
     lib = library.library_id(app_id, bearer)
     uploader = library.Uploader(lib, bearer, args.apply)
     assets = {locale: uploader.ensure(path.name, path.read_bytes(), library.CREATIVE) for locale, path in sorted(plan.items())}
-    if args.apply and uploader.new_ids:
-        states = library.wait_processed(lib, uploader.new_ids, bearer)
-        bad = [i for i, s in states.items() if s.get("state") not in library.PROCESSED]
+    # Every asset without a specId — fresh uploads and reused UPLOAD_COMPLETE
+    # rows alike — must finish processing first (mirrors library.sync_groups).
+    unprocessed = sorted({a["asset"] for a in assets.values() if not a.get("specId")})
+    if args.apply and unprocessed:
+        states = library.wait_processed(lib, unprocessed, bearer)
+        bad = {i: s for i, s in states.items() if s.get("state") not in library.PROCESSED}
         if bad:
-            sys.exit(f"Apple did not accept {len(bad)} upload(s): {', '.join(bad)} — nothing submitted")
-    items = [("appAssetLibraryImage", "appAssetLibraryImages", a["asset"]) for a in assets.values()]
+            details = ", ".join(f"{i}: {s.get('state')}" for i, s in sorted(bad.items()))
+            sys.exit(f"Apple did not accept {len(bad)} upload(s): {details} — nothing submitted")
+        for a in assets.values():
+            if a["asset"] in states:
+                a["state"] = states[a["asset"]]["state"]
+    items = []
     for locale, a in assets.items():
+        if a.get("state") in library.IN_OR_PAST_REVIEW:
+            print(f"  {locale:<8} {a['name']:<24} skipped — already {a['state']}")
+            continue
         print(f"  {locale:<8} {a['name']:<24} {a['status']}")
+        items.append(("appAssetLibraryImage", "appAssetLibraryImages", a["asset"]))
+    items = list(dict.fromkeys(items))
+    if not items:
+        print("nothing to submit — every creative is already in or past review.")
+        return
     book = ledger_module.for_config(_config_path(args), args.apply)
     try:
         result = review.submit(app_id, items, bearer, args.apply, ledger=book, command="assets submit")
