@@ -241,6 +241,17 @@ class ReplaceGroupTests(unittest.TestCase):
                                   "appStoreVersionLocalization", "vl-en", 1, "t", apply=True, current=self.current())
         self.assertIn("0 of 1", str(caught.exception))
 
+    def test_failed_placement_of_desired_asset_is_replaced(self):
+        self.replace(["a.png", "b.png"])
+        failed_id = next(pid for pid, p in self.fake.placements.items() if self.fake.images[p["image"]]["fileName"] == "a.png")
+        self.fake.placements[failed_id]["state"] = "FAILED"
+        result = self.replace(["a.png", "b.png"])
+        self.assertEqual((result["place"], result["unplace"]), (1, 1))
+        self.assertNotIn(failed_id, self.fake.placements)
+        self.assertEqual(self.fake.group("vl-en", "G_IPHONE_L"), ["a.png", "b.png"])
+        self.assertTrue(all(p["state"] != "FAILED" for p in self.current()))
+        self.assertEqual(self.replace(["a.png", "b.png"])["mode"], "unchanged")
+
     def test_never_deletes_assets(self):
         self.replace(["a.png", "b.png"])
         self.replace(["c.png"])

@@ -261,6 +261,9 @@ PARENTS = {
 VERSION_PLACEABLE = frozenset({"PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED", "REJECTED", "METADATA_REJECTED", "INVALID_BINARY"})
 
 
+FAILED_PLACEMENT = "FAILED"
+
+
 class PartialPlacement(asc.ASCError):
     pass
 
@@ -322,7 +325,10 @@ def replace_group(desired, placement_type, group, parent_kind, parent_id, max_co
     """
     if max_count is not None and len(desired) > max_count:
         raise asc.ASCError(f"{parent_id} {group}: {len(desired)} assets exceed the group limit of {max_count}")
-    pool = list(current)
+    # A FAILED placement never counts as showing its asset (submit refuses it):
+    # it is an extra to unplace, and the asset gets a fresh placement.
+    pool = [row for row in current if row.get("state") != FAILED_PLACEMENT]
+    failed = [row for row in current if row.get("state") == FAILED_PLACEMENT]
     final = []
     for want in desired:
         # Exact placement of this asset first; only then any placement of the same bytes.
@@ -332,7 +338,7 @@ def replace_group(desired, placement_type, group, parent_kind, parent_id, max_co
         if match:
             pool.remove(match)
         final.append([match["id"] if match else None, want])
-    extras = pool
+    extras = failed + pool
     missing = [slot for slot in final if slot[0] is None]
     action = {"type": placement_type, "group": group, "parent_id": parent_id, "place": len(missing), "unplace": len(extras)}
     if not missing and not extras:

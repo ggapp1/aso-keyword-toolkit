@@ -223,7 +223,8 @@ class FakeConnect:
         rows = sorted((p for p in self.placements.values() if p["parent_id"] == parent_id), key=lambda p: (p["group"], p["pos"]))
         ids = {id(p): pid for pid, p in self.placements.items()}
         data = [{"id": ids[id(p)], "type": "appAssetLibraryPlacements",
-                 "attributes": {"placementType": p["type"], "placementGroup": p["group"], "state": "PARENT_PREPARE_FOR_SUBMISSION"},
+                 "attributes": {"placementType": p["type"], "placementGroup": p["group"],
+                                "state": p.get("state", "PARENT_PREPARE_FOR_SUBMISSION")},
                  "relationships": {"image": {"data": {"type": "appAssetLibraryImages", "id": p["image"]}}}} for p in rows]
         included = [self._image_row(i) for i in {p["image"] for p in rows}]
         return {"data": data, "included": included, "links": {}}
