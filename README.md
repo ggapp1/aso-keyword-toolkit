@@ -66,6 +66,12 @@ research does not:
 pip install "aso-keyword-toolkit[connect]"
 ```
 
+**Rendering App Store creatives** (`asokit assets render`) also needs Pillow:
+
+```bash
+pip install "aso-keyword-toolkit[connect,render]"
+```
+
 ### Claude Code plugin
 
 The repo doubles as a [Claude Code](https://claude.com/claude-code) plugin
@@ -490,6 +496,301 @@ which keeps taking the flat `{productId: {locale: {field: value}}}` format.
 
 ---
 
+## App Store creatives, custom product pages and nominations
+
+Everything below goes through Apple's App Store Asset Library: images are
+uploaded once to the app's library, then *placed* on a surface — the default
+product page's editable version, or a custom product page. Rendering creatives
+needs Pillow; everything that talks to App Store Connect needs the `connect`
+extra:
+
+```bash
+pip install 'aso-keyword-toolkit[connect,render]'
+```
+
+Every write command follows the same shape as `metadata push`: a dry run
+unless `--apply`, validation before anything is sent, and uploads finished
+before any surface is touched. Concretely:
+
+- **Uploads first, writes second.** Every file in scope is uploaded (or
+  reused) and processed before the first placement changes. A failure there
+  leaves every live surface as it was.
+- **Identical bytes upload once.** Files are matched by content hash. A copy
+  App Review **rejected** blocks reuse of those exact bytes — change the
+  image — unless an accepted or approved twin of the same bytes exists.
+  `FAILED` placements are replaced, not kept.
+- **Group limits are checked before writing**, so a run never stops halfway
+  through a group because it ran out of slots.
+- **Nothing is ever deleted from the library, and no page is ever deleted.**
+  Only placements are removed, and page localizations only with `--prune`.
+
+### Rendering creatives from `assets.json`
+
+The header and search-results asset is one universal image, exactly
+**5244 × 2950**, cropped by Apple to 21:9 for the product-page header and to
+3:2 for search results. `assets render` draws a headline and one or two device
+captures inside the intersection of both crops, so nothing important is ever
+cut off. `assets.json` lives next to `asokit.json` by default:
+
+```json
+{
+  "canvas": {"width": 5244, "height": 2950},
+  "safeInset": 0.03,
+  "brand": {"background": "#4338CA", "text": "#FFFFFF", "frame": "#1C1C1E"},
+  "fonts": {
+    "default": {"path": "/Library/Fonts/SF-Pro-Display-Black.otf"},
+    "ja": {"path": "/System/Library/Fonts/ヒラギノ角ゴシック W8.ttc", "index": 0},
+    "ar-SA": {"path": "/System/Library/Fonts/SFArabic.ttf", "variation": "Bold"}
+  },
+  "noSpaceWrap": ["ja", "zh-Hans", "zh-Hant"],
+  "type": {"verb": {"size": 520, "min": 300, "step": 10, "lines": 1, "leading": 1.02},
+           "descriptor": {"size": 250, "min": 170, "step": 6, "lines": 2, "leading": 1.12},
+           "tight": {"verb": 340, "descriptor": 190}},
+  "variants": {
+    "default": {
+      "captures": ["{ui}/01-log-home.png", "{ui}/03-stats-insights.png"],
+      "capturesRoot": "screenshots/store/src",
+      "headlines": {"from": "screenshots/store/headlines.json", "slot": "hero", "fallbackSlot": 0}
+    },
+    "bpd": {
+      "captures": ["{ui}/06-add-entry-details.png", "{ui}/02-stats-patterns.png"],
+      "capturesRoot": "screenshots/store/src",
+      "headlines": {"en-US": ["LOG MOOD SWINGS", "Triggers, symptoms & patterns"], "en-GB": {"same": "en-US"}},
+      "ui": "en"
+    }
+  }
+}
+```
+
+`type` is optional. Without it the defaults are verb `{size 360, min 220,
+step 10, lines 2, leading 1.02}`, descriptor `{size 220, min 150, step 6,
+lines 2, leading 1.12}` and tight thresholds `{verb 260, descriptor 170}`.
+Overrides merge per key, so `{"verb": {"size": 400}}` changes the size and
+keeps the rest. Fonts are keyed by locale with `default` covering the rest.
+
+Headlines come either inline (`[verb, descriptor]` or `{"same": locale}`) or
+from a headlines file via `from`, where `slot` is an index or a named slot and
+`fallbackSlot` covers locales that lack it. A slot name the file doesn't
+define is an error, not a silent fallback.
+
+```bash
+asokit assets render                          # every variant, every locale it can resolve
+asokit assets render --variant bpd --locales en-US,en-GB
+```
+
+Output goes to `assets-out/<variant>/<locale>.png` (change it with `--out`),
+plus a contact sheet per variant at `assets-out/_contact/<variant>.png` —
+review that before uploading anything. The report flags `TIGHT` locales whose
+type had to shrink below the tight thresholds and locales that used the
+fallback headline.
+
+**A locale that can't be rendered properly fails on its own.** If its text
+won't fit the safe box at the minimum size and line count, or its headline
+fails the lint, that locale is reported, its old output file is deleted (so a
+stale image can't be uploaded by mistake), and the other locales still render.
+The lint catches what App Review rejects on creatives: prices and offers,
+URLs, rank and award claims, other platforms, medical claims. Languages
+without a word list get a warning, which `--strict-lint` turns into an error;
+`--no-lint` skips it. Right-to-left locales need Pillow built with libraqm.
+
+The files must be **8-bit RGB PNGs** (colour type 2) with no alpha channel and
+no `tRNS` chunk, at exactly 5244 × 2950. Rendered output already is; files you
+export from a design tool are checked the same way before upload.
+
+### Placing creatives
+
+```bash
+asokit assets status                          # library, asset states, header/search placements
+asokit assets status --catalog                # Apple's placement and spec catalog
+asokit assets push assets-out/default --target default           # dry run
+asokit assets push assets-out/default --target default --apply   # header + search asset
+asokit assets push assets-out/bpd --target "cpp:BPD tracker" --apply
+asokit assets submit assets-out/default --apply                  # review them on their own
+```
+
+`push` reads `DIR/<locale>.png` and places each file as both the product-page
+header asset and the search-results asset for that locale. `--target default`
+writes to the editable App Store version — the asset ships with your next
+release; `--target cpp:<name>` writes to a custom product page that already
+has an editable version (run `cpp push` first — `assets push` never creates
+page versions). Pushes to the default page refuse while a product page
+optimization test is running.
+
+`assets submit` sends the uploaded creatives to App Review by themselves,
+placing nothing, so they can be approved ahead of the version they will ride
+with. It runs a read-only preflight before uploading anything and skips assets
+already in or past review.
+
+### Custom product pages from `cpp.json`
+
+Custom product pages can now be assigned keywords, which makes them show up in
+organic search as well as in Apple Ads. `cpp.json` describes the pages you
+want; `cpp push` makes App Store Connect match it.
+
+```json
+{
+  "protectedKeywords": {"*": ["cyclothymia", "depression", "hypomania", "mania", "episode"]},
+  "pages": [
+    {
+      "name": "BPD tracker",
+      "deepLink": null,
+      "template": "appStoreVersion",
+      "locales": {
+        "en-US": {
+          "promotionalText": "…",
+          "keywords": ["bpd", "borderline"],
+          "screenshots": [
+            {"dir": "screenshots/store/out/en-US", "order": ["06", "02", "03", "01"], "display": "APP_IPHONE_67"}
+          ],
+          "creative": "bpd"
+        },
+        "en-GB": {"same": "en-US", "keywords": ["bpd", "borderline"]}
+      }
+    }
+  ]
+}
+```
+
+- `name` is the join key with live pages: unique and at most 30 characters.
+- `template: "appStoreVersion"` starts the page from your current version, so
+  every device family inherits the default screenshots and `screenshots` only
+  replaces the families it lists. Without a template, every family the live
+  version has must be listed.
+- `screenshots[].order` picks and orders files by name prefix; `creative`
+  names a rendered variant, read from `<creative-root>/<variant>/<locale>.png`
+  (`--creative-root`, default `assets-out`).
+- `same` copies `promotionalText`, `screenshots`, `creative` and the deep
+  link — **never keywords**. Keyword pools differ by locale, so keywords are
+  always explicit.
+- There is no `visible` field on purpose. Visibility changes only through
+  `cpp publish`.
+
+**Keyword rules.** `cpp check` enforces two rules that are stricter than
+Apple's:
+
+- **Ownership:** within a locale, a keyword belongs to at most one page —
+  counting live pages that aren't in your file. Pages with no keywords are
+  fine. Every keyword must also be in that locale's keyword field on the
+  latest approved version; one missing from the *editable* version is a
+  warning, because the page stops ranking for it when that version ships.
+- **Protected keywords:** anything in `protectedKeywords["*"]` or
+  `protectedKeywords["<locale>"]` is an error unless named with
+  `--allow-protected kw1,kw2`. Use it for the terms your default page has to
+  keep winning.
+
+**The lifecycle is four explicit steps**, and organic routing changes only at
+the last one:
+
+```bash
+asokit cpp check                                   # offline + online validation
+asokit cpp push --apply                            # pages created HIDDEN
+asokit cpp submit --pages "BPD tracker" --apply    # send to App Review
+asokit cpp publish --pages "BPD tracker" --apply   # after approval: visible, routing goes live
+asokit cpp publish --pages "BPD tracker" --hide --apply
+```
+
+What `cpp push` does to a page depends on its state:
+
+- **Missing** — created hidden, with its localizations, keywords, screenshots
+  and creative.
+- **Live** — promotional text and keyword changes are edited in place on the
+  live version, with no new version and no review. Screenshot, creative or
+  deep-link changes open a new version for review.
+- **In review** — skipped until review finishes.
+- **Unchanged** — nothing is written; a second push is a no-op.
+
+Across all pages in a run, keyword removals happen before additions, so moving
+a keyword from one page to another never trips ownership. `--pages` and
+`--locales` scope a push; `--locales` never deletes anything. `--prune`
+deletes page localizations missing from the file, but never a page's last
+localization.
+
+`cpp submit` and `cpp publish` require `--pages` and validate every named
+page before doing anything. `submit` refuses if a locale or device family
+declared in the file isn't actually placed on the page, and won't add pages to
+a draft submission that already holds something else, such as your app
+version. `publish` refuses pages that aren't approved.
+
+`--ads-export ads-groups.csv` on `cpp status` or `cpp push` writes one row per
+page and locale — page id, URL, visibility, state, keywords, deep link — for
+building matching Apple Ads ad groups. After `--apply` it re-reads the live
+pages, so the CSV has the ids of pages the run just created.
+
+### Featuring nominations from `nominations.json`
+
+```json
+{
+  "nominations": [
+    {
+      "name": "MoodSync — new product page & localizations",
+      "type": "APP_ENHANCEMENTS",
+      "description": "…",
+      "publishStartDate": "2026-11-16",
+      "deviceFamilies": ["IPHONE", "IPAD"],
+      "locales": ["en-US", "de-DE", "fr-FR"],
+      "notes": "…",
+      "supplementalMaterialsUris": []
+    }
+  ]
+}
+```
+
+```bash
+asokit nominations check                              # offline validation
+asokit nominations push --apply                       # create or update DRAFTS
+asokit nominations push --submit --name "MoodSync — new product page & localizations" --apply
+```
+
+`type` is `APP_LAUNCH`, `APP_ENHANCEMENTS` or `NEW_CONTENT`. Dates are
+`YYYY-MM-DD` and must be at least 14 days out — Apple's recommended notice —
+unless `--force`. `relatedApps` defaults to the app in `asokit.json`; if you
+set it, it must include that app.
+
+`push` matches nominations by name: missing ones are created as drafts,
+drafts that differ are updated, submitted ones are left alone. If two
+nominations in App Store Connect already share a name, `push` refuses rather
+than guess which one you meant. `--submit --name N` submits exactly that one,
+after every draft in the file has been written.
+
+### Screenshots through the Asset Library
+
+`screenshots push` keeps using the older screenshot-set API by default. The
+Asset Library engine is opt-in:
+
+```bash
+asokit screenshots status --engine library
+asokit screenshots push out/ --engine library                      # dry run
+asokit screenshots push out/ --engine library --mirror APP_IPAD_PRO_3GEN_129 --mirror-from en-US --apply
+```
+
+Same flags and the same validation, with two differences: it diffs, so an
+unchanged group isn't rewritten, and `--mirror` re-places the source locale's
+assets by id instead of downloading and re-uploading them. A mirrored display
+wins over local files for the same display.
+
+The default switches to `library` in a later release, once two things hold:
+`screenshots status` prints identical output under both engines, and one
+full-locale `--engine library` push has been verified in App Store Connect.
+
+### The ledger
+
+Every applied write appends one JSON line to `asokit-ledger.jsonl`, next to
+`asokit.json` — creates, placements, keyword changes, submissions, publishes,
+nominations. Dry runs write nothing.
+
+```json
+{"action": "publish", "command": "cpp publish", "page_id": "…", "page_name": "BPD tracker", "ts": "2026-11-02T09:14:00Z", …}
+```
+
+Commit it with your app. App Analytics reports each custom product page
+separately (Acquisition, by product page), but it doesn't tell you when a page
+went live or when its keywords changed. The ledger does: filter Analytics from
+the `publish` timestamp for a page, and compare before and after an
+`add_keywords` or `place` line for that page or locale. `cpp status` prints
+each page's last publish date from the ledger alongside its live state.
+
+---
+
 ## A worked example: budgeting apps in the German App Store
 
 A real run — 16 seeds, 40 candidates scored — tracking one of the established
@@ -572,6 +873,20 @@ serves a different audience. That's what the competitor table is for — read it
 | `asokit products push FILE` | dry-run a product text sync |
 | `asokit products apply FILE` | dry-run the full provisioning diff |
 | `asokit products apply FILE --apply` | provision groups, subscriptions, prices, availability |
+| `asokit screenshots status` | screenshot sets per locale on the editable version |
+| `asokit screenshots push DIR --engine library` | dry-run a screenshot replace through the Asset Library |
+| `asokit assets render` | render header/search creatives from `assets.json` |
+| `asokit assets status` | library, asset states, header and search placements |
+| `asokit assets push DIR --target default\|cpp:NAME` | dry-run placing creatives (`--apply` to write) |
+| `asokit assets submit DIR --apply` | send creatives to App Review on their own |
+| `asokit cpp check` | validate `cpp.json`, keyword ownership and pools |
+| `asokit cpp status` | live pages, versions, visibility, keywords |
+| `asokit cpp push --apply` | converge custom product pages to `cpp.json` (new pages hidden) |
+| `asokit cpp submit --pages NAME --apply` | send page versions to App Review |
+| `asokit cpp publish --pages NAME --apply` | make approved pages visible |
+| `asokit nominations check` | validate `nominations.json` |
+| `asokit nominations push --apply` | create or update nomination drafts |
+| `asokit nominations push --submit --name N --apply` | submit one nomination |
 
 Each research run writes `report.md` plus the raw `scores.json` and
 `expansion.json`, so you can build your own analysis on the data.
@@ -613,7 +928,8 @@ good pre-submission gate.
 
 **What Python version do I need?**
 3.9 or newer, tested on 3.9, 3.11 and 3.13. Research has no dependencies at
-all; only App Store Connect sync adds `pyjwt` and `cryptography`.
+all; only App Store Connect sync adds `pyjwt` and `cryptography`, and
+rendering creatives adds Pillow.
 
 ---
 
@@ -643,7 +959,13 @@ The codebase is small and deliberately boring: `storefronts` (the country
 table), `sources` (HTTP and caching), `research` (expansion and scoring),
 `metadata` (pure validation, no I/O), `packing` (keyword-field selection, also
 pure), `asc` (App Store Connect), `report` (rendering), `suggest` (seed
-derivation).
+derivation). The App Store Connect write paths follow the same split — pure
+modules plan, executors write: `library` (Asset Library uploads and
+placements), `creative` (creative file checks and lint, pure), `render`
+(creative rendering, optional Pillow), `cpp` (custom product page validation
+and planning, pure), `cpp_apply` (custom product page executor), `review`
+(review submissions), `nominations` (featuring nominations), `ledger` (the
+append-only write log).
 
 Contributions welcome, and two tables in particular are built to be extended
 by people who know a language better than I do:
