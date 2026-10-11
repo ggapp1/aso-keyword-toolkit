@@ -1,4 +1,5 @@
 import json
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -42,6 +43,10 @@ class RenderTests(unittest.TestCase):
         search_left, search_right = (5244 - 2950 * 1.5) / 2, (5244 + 2950 * 1.5) / 2
         self.assertTrue(header_top <= y0 and y1 <= header_bottom)
         self.assertTrue(search_left <= x0 and x1 <= search_right)
+        # Inset 0: the far edges never round outward; the near edges are the spec's floored origin.
+        x0, y0, x1, y1 = render.safe_box(5244, 2950, 0)
+        self.assertTrue(math.floor(header_top) <= y0 and y1 <= header_bottom, (y0, y1, header_top, header_bottom))
+        self.assertTrue(math.floor(search_left) <= x0 and x1 <= search_right, (x0, x1, search_left, search_right))
 
     def test_output_size_mode_and_containment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -71,6 +76,34 @@ class RenderTests(unittest.TestCase):
             bbox = ImageChops.difference(image, Image.new("RGB", image.size, BG)).getbbox()
             x0, y0, x1, y1 = render.safe_box(5244, 2950, 0.03)
             self.assertTrue(bbox[0] >= x0 and bbox[1] >= y0 and bbox[2] <= x1 and bbox[3] <= y1, (bbox, (x0, y0, x1, y1)))
+
+    def test_failed_rerender_removes_stale_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = write_config(tmp, {"v": variant({"en-US": ["LOG", "Patterns"]})})
+            render.render_variant(cfg, "v", Path(tmp) / "out")
+            target = Path(tmp) / "out" / "v" / "en-US.png"
+            self.assertTrue(target.exists())
+            cfg["variants"]["v"]["headlines"]["en-US"] = ["FREE TRIAL", "Patterns"]
+            result = render.render_variant(cfg, "v", Path(tmp) / "out")
+            self.assertIn("en-US", result["failed"])
+            self.assertFalse(target.exists())
+
+    def test_partial_type_override_merges_with_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = write_config(tmp, {"v": variant({"en-US": ["LOG", "Patterns"]})})
+            cfg["type"] = {"verb": {"size": 300}}
+            result = render.render_variant(cfg, "v", Path(tmp) / "out")
+            self.assertEqual(result["failed"], {})
+            self.assertEqual(result["report"][0]["verb_px"], 300)
+
+    def test_text_that_overflows_the_safe_box_fails_the_locale(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = write_config(tmp, {"v": variant({"en-US": ["LOG", "AB CD"], "en-GB": ["LOG", "Patterns"]})})
+            cfg["type"]["descriptor"] = {"size": 900, "min": 900, "step": 6, "lines": 2, "leading": 1.12}
+            cfg["type"]["verb"] = {"size": 300, "min": 300, "step": 10, "lines": 1, "leading": 1.02}
+            result = render.render_variant(cfg, "v", Path(tmp) / "out", locales=["en-US"])
+            self.assertIn("safe box", result["failed"].get("en-US", ""))
+            self.assertFalse((Path(tmp) / "out" / "v" / "en-US.png").exists())
 
     def test_ltr_devices_trail_on_the_right(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -133,6 +166,18 @@ class HeadlineResolutionTests(unittest.TestCase):
             self.assertEqual(by_index["en-GB"]["verb"], "TRACK")
             self.assertTrue(by_index["ar-SA"]["rtl"])
             self.assertEqual(by_index["de-DE"]["ui"], "de")
+
+    def test_mistyped_slot_is_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(tmp, {"from": "headlines.json", "slot": "heroo"})
+            with self.assertRaisesRegex(render.RenderError, "heroo"):
+                render.resolve_headlines(cfg, "d")
+            if HAVE_PIL:
+                with self.assertRaisesRegex(render.RenderError, "heroo"):
+                    render.render_variant(cfg, "d", Path(tmp) / "out")
+            cfg = self._cfg(tmp, {"from": "headlines.json", "slot": 7})
+            with self.assertRaisesRegex(render.RenderError, "7"):
+                render.resolve_headlines(cfg, "d")
 
     def test_hero_with_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:

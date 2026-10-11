@@ -40,7 +40,8 @@ def safe_box(width, height, inset):
     w = min(width, height * 3 / 2)
     h = min(height, width * 9 / 21)
     x0, y0 = math.floor((width - w) / 2), math.floor((height - h) / 2)
-    x1, y1 = x0 + math.ceil(w), y0 + math.ceil(h)
+    # Floor the far edge too: with a floored origin, origin + w never passes the crop's far edge.
+    x1, y1 = math.floor(x0 + w), math.floor(y0 + h)
     dx, dy = math.ceil((x1 - x0) * inset), math.ceil((y1 - y0) * inset)
     return x0 + dx, y0 + dy, x1 - dx, y1 - dy
 
@@ -101,7 +102,15 @@ def _inline(cfg, variant):
 def resolve_headlines(cfg, variant_name):
     variant = cfg["variants"][variant_name]
     heads = variant["headlines"]
-    return _from_file(cfg, heads) if "from" in heads else _inline(cfg, variant)
+    out = _from_file(cfg, heads) if "from" in heads else _inline(cfg, variant)
+    if not out:
+        if "from" in heads:
+            slots = f"slot {heads.get('slot')!r}"
+            if "fallbackSlot" in heads:
+                slots += f" (fallbackSlot {heads['fallbackSlot']!r})"
+            raise RenderError(f"variant '{variant_name}': {slots} matched no locale in {heads['from']} — check the slot name/index")
+        raise RenderError(f"variant '{variant_name}' has no headlines")
+    return out
 
 
 # ---------------------------------------------------------------- text
@@ -233,7 +242,8 @@ def _compose(cfg, variant, locale, head, captures):
     background = _hex(brand.get("background", "#000000"))
     text_colour = _hex(brand.get("text", "#FFFFFF"))
     frame_colour = _hex(brand.get("frame", "#1C1C1E"))
-    types = {**DEFAULT_TYPE, **cfg.get("type", {})}
+    overrides = cfg.get("type", {})
+    types = {key: {**DEFAULT_TYPE[key], **overrides.get(key, {})} for key in DEFAULT_TYPE}
     x0, y0, x1, y1 = safe_box(canvas[0], canvas[1], cfg.get("safeInset", 0.03))
     box_w, box_h = x1 - x0, y1 - y0
     rtl = head["rtl"]
@@ -252,7 +262,7 @@ def _compose(cfg, variant, locale, head, captures):
     column_w = box_w * 0.52
     group_w = sum(f.width for f in frames) - round(frames[0].width * 0.04) * (count - 1)
     if group_w + 2 * margin > column_w:
-        raise RenderError(f"{locale}: devices need {group_w + 2 * margin}px, column has {column_w:.0f}px — lower type or use 1 device")
+        raise RenderError(f"{locale}: devices need {group_w + 2 * margin}px, column has {column_w:.0f}px — use 1 device or narrower captures")
     column_x0 = x1 - column_w if not rtl else x0
     start_x = column_x0 + (column_w - group_w) / 2
     top = y0 + (box_h - frame_h * (1 + offset * (count - 1))) / 2
@@ -282,14 +292,23 @@ def _compose(cfg, variant, locale, head, captures):
     block_h = verb_lead * len(verb_lines) + gap + desc_lead * len(desc_lines)
     y = y0 + (box_h - block_h) / 2
     kwargs = {"direction": "rtl"} if rtl else {}
+    # Lay out every line first and check its ink against the safe box, so an oversized
+    # type override fails this locale instead of drawing outside the crops.
+    placed = []
     for lines, font, lead in ((verb_lines, verb_font, verb_lead), (desc_lines, desc_font, desc_lead)):
         for line in lines:
-            w = _width(draw, line, font, rtl)
+            left, top_offset, right, bottom = draw.textbbox((0, 0), line, font=font, **kwargs)
+            w = right - left
             tx = x0 if not rtl else x1 - w
-            left, top_offset, _, _ = draw.textbbox((0, 0), line, font=font, **kwargs)
-            draw.text((tx - left, y - top_offset), line, font=font, fill=text_colour, **kwargs)
+            ink = (tx, y, tx + w, y + bottom - top_offset)
+            if ink[0] < x0 or ink[1] < y0 or ink[2] > x1 or ink[3] > y1:
+                raise RenderError(f"{locale}: headline block ({block_h}px tall) does not fit the safe box "
+                                  f"({box_h}px) — lower the type size or line count")
+            placed.append(((tx - left, y - top_offset), line, font))
             y += lead
         y += gap
+    for origin, line, font in placed:
+        draw.text(origin, line, font=font, fill=text_colour, **kwargs)
     report = {"locale": locale, "verb_px": verb_size, "verb_lines": len(verb_lines), "descriptor_px": desc_size,
               "descriptor_lines": len(desc_lines), "fallback": head["fallback"],
               "device_width_pct": round(100 * frames[0].width / canvas[0], 1),
@@ -318,24 +337,30 @@ def render_variant(cfg, variant_name, out_dir, locales=None, lint=True, strict_l
     result = {"written": [], "failed": {}, "report": [], "unlinted": []}
     for locale in wanted:
         head = heads[locale]
+        path = out / f"{locale}.png"
+
+        def fail(reason):
+            # Never leave a previous render behind: it would be picked up and uploaded as current.
+            result["failed"][locale] = reason
+            path.unlink(missing_ok=True)
+
         if lint:
             if not creative.linted(locale):
                 result["unlinted"].append(locale)
                 if strict_lint:
-                    result["failed"][locale] = "no lint word list for this language (--strict-lint)"
+                    fail("no lint word list for this language (--strict-lint)")
                     continue
             hits = creative.lint(f"{head['verb']} {head['descriptor']}", locale)
             if hits:
-                result["failed"][locale] = "; ".join(hits)
+                fail("; ".join(hits))
                 continue
         ui = head.get("ui") or variant.get("ui") or "en"
         try:
             captures = [Image.open(root / c.replace("{ui}", ui)) for c in variant["captures"]]
             image, report = _compose(cfg, variant, locale, head, captures)
         except (RenderError, OSError) as error:
-            result["failed"][locale] = str(error)
+            fail(str(error))
             continue
-        path = out / f"{locale}.png"
         image.save(path, optimize=True)
         result["written"].append(path)
         result["report"].append(report)
