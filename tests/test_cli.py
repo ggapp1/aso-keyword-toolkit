@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 
 from asokit import cli
+from tests.fakes import FakeCppConnect
+from tests.test_cpp import make_doc, page as cpp_page
 
 
 class Args:
@@ -121,10 +123,6 @@ class SuggestOutput(unittest.TestCase):
     def test_without_a_baseline_the_draft_is_keywords_only(self):
         drafted = self.run_suggest(["--market", "de", "--json"])
         self.assertEqual(list(drafted["de-DE"]), ["keywords"])
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 import contextlib
@@ -252,7 +250,73 @@ class AssetsSubmitCommand(AssetsFixture):
 class AssetsStatusLabels(AssetsFixture):
     def test_status_labels_header_and_search(self):
         self.run_cli("assets", "push", str(self.out), "--target", "default", "--apply")
-        text = self.run_cli("assets", "status")
+        # Plain FakeConnect models no custom product pages; status now lists them too.
+        with mock.patch.object(cli.cpp_apply, "list_pages", return_value=[]):
+            text = self.run_cli("assets", "status")
         self.assertIn("header:", text)
         self.assertIn("search:", text)
         self.assertNotIn("product:", text)
+
+
+class CppCommands(unittest.TestCase):
+    def setUp(self):
+        self.fake = install(self, FakeCppConnect())
+        self.root = Path(tempfile.mkdtemp())
+        make_doc(self.root, [cpp_page()])
+        (self.root / "asokit.json").write_text(json.dumps({"app": {"appId": 1}}))
+        patcher = mock.patch.object(cli, "_bearer", return_value="t")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def run_cli(self, *argv):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            cli.main(["--config", str(self.root / "asokit.json"), *argv])
+        return buffer.getvalue()
+
+    def test_check_offline(self):
+        self.assertIn("ok", self.run_cli("cpp", "check", "--offline").lower())
+
+    def test_push_dry_run_then_apply_then_status_export(self):
+        self.assertIn("DRY RUN", self.run_cli("cpp", "push"))
+        self.assertEqual(self.fake.writes(), [])
+        self.run_cli("cpp", "push", "--apply")
+        export = self.root / "ads.csv"
+        text = self.run_cli("cpp", "status", "--ads-export", str(export))
+        self.assertIn("BPD tracker", text)
+        self.assertIn("bpd;borderline", export.read_text())
+
+    def test_submit_and_publish_require_pages(self):
+        with self.assertRaises(SystemExit):
+            self.run_cli("cpp", "submit", "--apply")
+        with self.assertRaises(SystemExit):
+            self.run_cli("cpp", "publish", "--apply")
+
+    def test_assets_push_cpp_target_needs_editable_version(self):
+        out = self.root / "assets-out" / "bpd"
+        with self.assertRaises(SystemExit) as caught:
+            self.run_cli("assets", "push", str(out), "--target", "cpp:BPD tracker")
+        self.assertIn("cpp push", str(caught.exception))
+        self.run_cli("cpp", "push", "--apply")
+        self.run_cli("assets", "push", str(out), "--target", "cpp:BPD tracker", "--locales", "en-US")
+
+    def test_check_malformed_keywords_reports_cleanly(self):
+        broken = cpp_page()
+        broken["locales"]["en-US"]["keywords"] = "bpd, borderline"
+        (self.root / "cpp.json").write_text(json.dumps({"pages": [broken]}))
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer), self.assertRaises(SystemExit):
+            cli.main(["--config", str(self.root / "asokit.json"), "cpp", "check", "--offline"])
+        self.assertIn("must be a list of strings", buffer.getvalue())
+
+    def test_assets_status_lists_cpp_pages_without_editable_app_version(self):
+        self.run_cli("cpp", "push", "--apply")
+        self.fake.versions[:] = [v for v in self.fake.versions if v["id"] == "v0"]
+        text = self.run_cli("assets", "status")
+        self.assertIn("no editable App Store version", text)
+        self.assertIn("custom product page 'BPD tracker'", text)
+        self.assertIn("header:", text)
+
+
+if __name__ == "__main__":
+    unittest.main()

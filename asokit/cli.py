@@ -16,9 +16,15 @@
   asokit assets status [--catalog]     library, asset states, placements
   asokit assets push DIR --target default [--apply]   place creatives
   asokit assets submit DIR [--apply]   standalone review of creatives
+  asokit cpp check [--offline]         validate cpp.json (keywords, limits, files)
+  asokit cpp status [--ads-export P]   live custom product pages
+  asokit cpp push [--apply]            converge pages to cpp.json (created hidden)
+  asokit cpp submit --pages N [--apply]   send page versions to App Review
+  asokit cpp publish --pages N [--apply]  make approved pages visible (routing goes live)
 """
 
 import argparse
+import csv
 import json
 import os
 import sys
@@ -26,6 +32,8 @@ from pathlib import Path
 
 from . import (
     asc,
+    cpp,
+    cpp_apply,
     creative,
     ledger as ledger_module,
     library,
@@ -999,13 +1007,23 @@ def cmd_assets_status(args):
     version = asc.editable_version(app_id, bearer)
     if not version:
         print("no editable App Store version")
-        return
-    print(f"editable version {version['attributes']['versionString']} ({version['attributes']['appStoreState']}):")
-    for locale, loc_id in sorted(asc._localizations(version["id"], bearer).items()):
-        rows = [p for p in library.surface_placements("appStoreVersionLocalization", loc_id, bearer)
-                if p["type"] in (library.HEADER, library.SEARCH)]
-        line = ", ".join(f"{_SURFACE_LABELS[p['type']]}:{p['state']}" for p in rows) or "(no header/search assets)"
-        print(f"  {locale:<8} {line}")
+    else:
+        print(f"editable version {version['attributes']['versionString']} ({version['attributes']['appStoreState']}):")
+        for locale, loc_id in sorted(asc._localizations(version["id"], bearer).items()):
+            rows = [p for p in library.surface_placements("appStoreVersionLocalization", loc_id, bearer)
+                    if p["type"] in (library.HEADER, library.SEARCH)]
+            print(f"  {locale:<8} {_placement_line(rows)}")
+    for row in cpp_apply.list_pages(app_id, bearer):
+        snap = cpp_apply.snapshot_page(row, bearer)
+        page_version = snap["version"] or {}
+        print(f"custom product page '{snap['name']}' ({page_version.get('state', 'no version')}):")
+        for locale, loc in sorted((page_version.get("localizations") or {}).items()):
+            rows = [p for p in loc["placements"] if p["type"] in (library.HEADER, library.SEARCH)]
+            print(f"  {locale:<8} {_placement_line(rows)}")
+
+
+def _placement_line(rows):
+    return ", ".join(f"{_SURFACE_LABELS[p['type']]}:{p['state']}" for p in rows) or "(no header/search assets)"
 
 
 def _default_target(app_id, bearer):
@@ -1036,6 +1054,18 @@ def _creative_plan(args):
 def _resolve_target(args, app_id, bearer):
     if args.target == "default":
         return _default_target(app_id, bearer)
+    if args.target.startswith("cpp:"):
+        name = args.target[4:]
+        row = next((r for r in cpp_apply.list_pages(app_id, bearer) if (r.get("attributes") or {}).get("name") == name), None)
+        if row is None:
+            sys.exit(f"no custom product page named '{name}' — run `asokit cpp push` first")
+        snap = cpp_apply.snapshot_page(row, bearer, with_media=False)
+        version = snap["version"]
+        if version is None or version["state"] not in cpp.EDITABLE:
+            sys.exit(f"'{name}' has no editable version ({version and version['state']}) — run `asokit cpp push` first; "
+                     "assets push never creates page versions")
+        parents = {locale: loc["id"] for locale, loc in version["localizations"].items()}
+        return "appCustomProductPageLocalization", parents, cpp_apply.FEATURE
     sys.exit(f"unknown target '{args.target}' — use 'default' or 'cpp:<page name>'")
 
 
@@ -1107,6 +1137,137 @@ def cmd_assets_submit(args):
     except review.SubmissionBlocked as error:
         sys.exit(str(error))
     print(f"submission {result['submission']}: +{len(result['add'])} item(s)")
+    print("submitted for review." if result["submitted"] else "\nDRY RUN — nothing written. Re-run with --apply to submit.")
+
+
+ADS_FIELDS = ["page_name", "page_id", "page_url", "visible", "latest_state", "locale", "keywords", "deep_link"]
+
+
+def _cpp_path(args):
+    return Path(args.file) if args.file else _config_path(args).resolve().parent / "cpp.json"
+
+
+def _cpp_doc(args):
+    path = _cpp_path(args)
+    if not path.exists():
+        sys.exit(f"no {path} — see the README for the cpp.json format")
+    try:
+        return cpp.load(path)
+    except ValueError as error:  # malformed JSON (CppError is a ValueError too)
+        sys.exit(f"{path}: {error}")
+
+
+def _expand(doc):
+    try:
+        return cpp.expand(doc)
+    except cpp.CppError as error:
+        sys.exit(f"cpp.json: {error}")
+
+
+def _write_ads(path, rows):
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=ADS_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"ads export → {path} ({len(rows)} rows)")
+
+
+def _pages_arg(args, required):
+    names = [n.strip() for n in (args.pages or "").split(",") if n.strip()]
+    if required and not names:
+        sys.exit("--pages is required (comma-separated page names) — this command never acts on every page at once")
+    return names or None
+
+
+def _csv_list(value):
+    return [item.strip() for item in (value or "").split(",") if item.strip()]
+
+
+def _report(problems, warnings):
+    for warning in warnings:
+        print(f"  warning: {warning}")
+    if problems:
+        print("validation failed — nothing sent:")
+        for problem in problems:
+            print(f"  - {problem}")
+        sys.exit(1)
+
+
+def cmd_cpp_check(args):
+    doc = _cpp_doc(args)
+    online = None
+    if not args.offline:
+        _, app_id = _require_app_id(args)
+        bearer = _bearer()
+        online = cpp_apply.online_context(app_id, doc, bearer, library.Catalog.fetch(bearer))
+    problems, warnings = cpp.check(doc, args.creative_root, _csv_list(args.allow_protected), not args.no_lint, online=online)
+    _report(problems, warnings)
+    print(f"ok — {len(_expand(doc))} page(s) valid{' (offline: keyword pools not checked)' if args.offline else ''}")
+
+
+def cmd_cpp_status(args):
+    _, app_id = _require_app_id(args)
+    bearer = _bearer()
+    book = ledger_module.for_config(_config_path(args), True)
+    snapshots = {}
+    for row in cpp_apply.list_pages(app_id, bearer):
+        snap = cpp_apply.snapshot_page(row, bearer, with_media=False)
+        snapshots[snap["name"]] = snap
+        version = snap["version"] or {}
+        print(f"{snap['name']}  id {snap['id']}  {'visible' if snap['visible'] else 'hidden'}  {version.get('state', '(no version)')}"
+              f"  published {book.last('publish', page_id=snap['id']) or '-'}")
+        for locale, loc in sorted((version.get("localizations") or {}).items()):
+            print(f"  {locale:<8} {', '.join(sorted(loc['keywords'])) or '(no keywords)'}")
+    if not snapshots:
+        print("no custom product pages")
+    if args.ads_export:
+        pages = _expand(_cpp_doc(args)) if _cpp_path(args).exists() else []
+        _write_ads(args.ads_export, cpp.ads_rows(pages, snapshots))
+
+
+def cmd_cpp_push(args):
+    doc = _cpp_doc(args)
+    _, app_id = _require_app_id(args)
+    bearer = _bearer()
+    book = ledger_module.for_config(_config_path(args), args.apply)
+    try:
+        result = cpp_apply.push(app_id, doc, bearer, args.apply, creative_root=args.creative_root,
+                                pages=_pages_arg(args, required=False), locales=_csv_list(args.locales) or None,
+                                prune=args.prune, allow_protected=_csv_list(args.allow_protected),
+                                lint=not args.no_lint, ledger=book, out=print)
+    except asc.ASCError as error:
+        print(f"\naborted — {error}\nRe-running is safe: every step re-diffs against live state.", flush=True)
+        sys.exit(1)
+    _report(result["problems"], result["warnings"])
+    if args.ads_export:
+        _write_ads(args.ads_export, cpp.ads_rows(_expand(doc), result["context"]["snapshots"]))
+    if not result["actions"]:
+        print("no changes — App Store Connect already matches cpp.json")
+    print("\napplied — pages stay hidden until `asokit cpp publish`." if args.apply
+          else "\nDRY RUN — nothing written. Re-run with --apply to push.")
+
+
+def cmd_cpp_publish(args):
+    names = _pages_arg(args, required=True)
+    _, app_id = _require_app_id(args)
+    book = ledger_module.for_config(_config_path(args), args.apply)
+    try:
+        cpp_apply.publish(app_id, names, _bearer(), args.apply, hide=args.hide, ledger=book)
+    except asc.ASCError as error:
+        sys.exit(str(error))
+    print("applied." if args.apply else "\nDRY RUN — nothing written. Re-run with --apply.")
+
+
+def cmd_cpp_submit(args):
+    names = _pages_arg(args, required=True)
+    doc = _cpp_doc(args)
+    _, app_id = _require_app_id(args)
+    book = ledger_module.for_config(_config_path(args), args.apply)
+    try:
+        result = cpp_apply.submit(app_id, doc, names, _bearer(), args.apply, ledger=book)
+    except asc.ASCError as error:
+        sys.exit(str(error))
+    print(f"submission {result['submission']}: +{len(result['add'])} item(s), {len(result['existing'])} already in it")
     print("submitted for review." if result["submitted"] else "\nDRY RUN — nothing written. Re-run with --apply to submit.")
 
 
@@ -1297,6 +1458,50 @@ def build_parser():
     assets_submit.add_argument("--app-id")
     assets_submit.add_argument("--apply", action="store_true")
     assets_submit.set_defaults(func=cmd_assets_submit)
+
+    cpp_command = subcommands.add_parser("cpp", help="custom product pages from cpp.json")
+    cpp_sub = cpp_command.add_subparsers(dest="cpp_command", required=True)
+
+    def cpp_common(sub, apply=False):
+        sub.add_argument("--file", help="path to cpp.json (default: next to the config)")
+        sub.add_argument("--app-id")
+        if apply:
+            sub.add_argument("--apply", action="store_true")
+
+    cpp_check = cpp_sub.add_parser("check", help="validate cpp.json (online unless --offline)")
+    cpp_common(cpp_check)
+    cpp_check.add_argument("--offline", action="store_true")
+    cpp_check.add_argument("--allow-protected", help="comma-separated protected keywords to allow")
+    cpp_check.add_argument("--creative-root", default="assets-out")
+    cpp_check.add_argument("--no-lint", action="store_true")
+    cpp_check.set_defaults(func=cmd_cpp_check)
+
+    cpp_status = cpp_sub.add_parser("status", help="live pages, versions, visibility and keywords")
+    cpp_common(cpp_status)
+    cpp_status.add_argument("--ads-export", help="write page/keyword CSV for Apple Ads ad groups")
+    cpp_status.set_defaults(func=cmd_cpp_status)
+
+    cpp_push = cpp_sub.add_parser("push", help="converge App Store Connect to cpp.json (dry run unless --apply)")
+    cpp_common(cpp_push, apply=True)
+    cpp_push.add_argument("--pages", help="comma-separated page names (default: all in the file)")
+    cpp_push.add_argument("--locales", help="comma-separated locales; never deletes outside them")
+    cpp_push.add_argument("--prune", action="store_true", help="delete page localizations missing from the file")
+    cpp_push.add_argument("--allow-protected")
+    cpp_push.add_argument("--creative-root", default="assets-out")
+    cpp_push.add_argument("--no-lint", action="store_true")
+    cpp_push.add_argument("--ads-export")
+    cpp_push.set_defaults(func=cmd_cpp_push)
+
+    cpp_publish = cpp_sub.add_parser("publish", help="make approved pages visible — organic routing goes live")
+    cpp_common(cpp_publish, apply=True)
+    cpp_publish.add_argument("--pages", help="comma-separated page names (required)")
+    cpp_publish.add_argument("--hide", action="store_true", help="hide instead of publish")
+    cpp_publish.set_defaults(func=cmd_cpp_publish)
+
+    cpp_submit = cpp_sub.add_parser("submit", help="send page versions to App Review")
+    cpp_common(cpp_submit, apply=True)
+    cpp_submit.add_argument("--pages", help="comma-separated page names (required)")
+    cpp_submit.set_defaults(func=cmd_cpp_submit)
     return parser
 
 
