@@ -9,6 +9,7 @@ New pages are created hidden; only `publish` changes visibility; only
 `submit` (through `review.submit`) sends anything to App Review.
 """
 import re
+import shlex
 
 from . import asc, cpp, library, review
 from . import screenshots as shots
@@ -44,20 +45,24 @@ def _version_key(row):
     return tuple(int(n) for n in re.findall(r"\d+", text)), text
 
 
-def latest_version(page_id, bearer):
-    rows = [row for row in asc.call_all("GET", f"/appCustomProductPages/{page_id}/appCustomProductPageVersions?limit=200", bearer)
+def page_versions(page_id, bearer):
+    return [row for row in asc.call_all("GET", f"/appCustomProductPages/{page_id}/appCustomProductPageVersions?limit=200", bearer)
             if (row.get("attributes") or {}).get("state") != "REPLACED_WITH_NEW_VERSION"]
+
+
+def latest_version(page_id, bearer, rows=None):
+    rows = page_versions(page_id, bearer) if rows is None else rows
     return max(rows, key=_version_key) if rows else None
 
 
-def snapshot_page(row, bearer, with_media=True):
-    attrs = row.get("attributes") or {}
-    snap = {"id": row["id"], "name": attrs.get("name"), "url": attrs.get("url"), "visible": attrs.get("visible"), "version": None}
-    version = latest_version(row["id"], bearer)
-    if version is None:
-        return snap
+def _state(row):
+    return (row.get("attributes") or {}).get("state")
+
+
+def read_localizations(version_id, bearer, with_media=True):
+    """{locale: {id, promotionalText, keywords, placements}} of one page version."""
     localizations = {}
-    for loc in asc.call_all("GET", f"/appCustomProductPageVersions/{version['id']}/appCustomProductPageLocalizations?limit=200", bearer):
+    for loc in asc.call_all("GET", f"/appCustomProductPageVersions/{version_id}/appCustomProductPageLocalizations?limit=200", bearer):
         loc_attrs = loc.get("attributes") or {}
         keywords = asc.call_all("GET", f"/appCustomProductPageLocalizations/{loc['id']}/searchKeywords?limit=200", bearer)
         localizations[loc_attrs["locale"]] = {
@@ -65,6 +70,30 @@ def snapshot_page(row, bearer, with_media=True):
             "keywords": {cpp.norm(k["id"]): k["id"] for k in keywords},
             "placements": library.surface_placements("appCustomProductPageLocalization", loc["id"], bearer) if with_media else [],
         }
+    return localizations
+
+
+def snapshot_page(row, bearer, with_media=True):
+    """Live state of one page in the shape `cpp.plan` consumes.
+
+    `ever_live` says whether any version of the page is ACCEPTED/APPROVED: a
+    visible page without one starts routing the moment Apple approves it, so
+    push hides it and submit refuses it. `live_version_id` is the newest
+    approved version when the latest is a newer (editable/in-review) one."""
+    attrs = row.get("attributes") or {}
+    snap = {"id": row["id"], "name": attrs.get("name"), "url": attrs.get("url"), "visible": attrs.get("visible"),
+            "version": None, "ever_live": False, "live_version_id": None}
+    rows = page_versions(row["id"], bearer)
+    live_rows = [r for r in rows if _state(r) in cpp.LIVE]
+    snap["ever_live"] = bool(live_rows)
+    version = latest_version(row["id"], bearer, rows)
+    if version is None:
+        return snap
+    if live_rows:
+        newest_live = max(live_rows, key=_version_key)
+        if newest_live["id"] != version["id"]:
+            snap["live_version_id"] = newest_live["id"]
+    localizations = read_localizations(version["id"], bearer, with_media)
     version_attrs = version.get("attributes") or {}
     snap["version"] = {"id": version["id"], "state": version_attrs.get("state"), "deepLink": version_attrs.get("deepLink"),
                        "localizations": localizations}
@@ -149,6 +178,8 @@ def describe(action):
         return f"  create_page          {action['page']} (hidden; locales {', '.join(action['locales'])}; template {action['template']})"
     if op == "skip":
         return f"  skip                 {action['page']}: {action['reason']}"
+    if op == "hide_page":
+        return f"  hide_page            {action['page']} (visible but never approved — hidden so approval cannot start routing)"
     return f"  {op:<20} {where}{live}"
 
 
@@ -174,6 +205,11 @@ def _reread(name, page_id, bearer, version_id=None):
     if version["state"] not in cpp.EDITABLE:
         raise asc.ASCError(f"{name}: the new version {version['id']} is {version['state']}, not editable — nothing more written")
     return snap
+
+
+def _hide(name, page_id, bearer, ledger):
+    asc.call("PATCH", f"/appCustomProductPages/{page_id}", bearer, _visible_body(page_id, False))
+    ledger.record("cpp push", "hide_page", page_name=name, page_id=page_id)
 
 
 def _keyword_body(ids):
@@ -249,6 +285,10 @@ def _execute(app_id, page, snap, actions, media, ctx, catalog, bearer, ledger, o
             }})["data"]
             ledger.record("cpp push", "create_version", page_name=name, page_id=action["page_id"], version_id=created["id"])
             return executed + [action], ("version", created["id"])
+        if op == "hide_page":
+            _hide(name, action["page_id"], bearer, ledger)
+            executed.append(action)
+            continue
         locale = action.get("locale")
         executed.append(action)
         if op == "update_deep_link":
@@ -291,8 +331,10 @@ def _execute(app_id, page, snap, actions, media, ctx, catalog, bearer, ledger, o
 
 def push(app_id, doc, bearer, apply, creative_root="assets-out", pages=None, locales=None, prune=False,
          allow_protected=(), lint=True, ledger=NULL, out=print):
-    """Validate, plan every in-scope page, then (with apply) write in three phases:
+    """Validate, plan every in-scope page, then (with apply) write in phases:
 
+    0. hide any in-scope page that is visible but has never had an approved
+       version (a lost create response or failed hide PATCH) — protective, so first;
     1. prepare — upload/reuse, processing wait and spec/group/limit checks for ALL pages' media;
        no surface (metadata or placement) write happens before this succeeds;
     2. keyword removals on every page, so a keyword moving between pages is freed before it is linked;
@@ -321,6 +363,13 @@ def push(app_id, doc, bearer, apply, creative_root="assets-out", pages=None, loc
         result["actions"] = [a for _, _, actions, _ in plans for a in actions]
         return result
 
+    # Protective hides first, before even the uploads: they only ever stop a page
+    # from starting to route on approval, and must not wait on anything that can fail.
+    for page, snap, actions, _ in plans:
+        for action in actions:
+            if action["op"] == "hide_page":
+                _hide(page["name"], action["page_id"], bearer, ledger)
+
     requests = [r for *_, media in plans for rs in media.values() for r in rs]
     if requests:
         library.prepare(requests, catalog, FEATURE, library.library_id(app_id, bearer), bearer, True)
@@ -330,14 +379,15 @@ def push(app_id, doc, bearer, apply, creative_root="assets-out", pages=None, loc
             if action["op"] == "remove_keywords":
                 _remove_keywords(page["name"], action, snap, bearer, ledger)
 
+    early = ("hide_page", "remove_keywords")
     for page, snap, actions, media in plans:
-        if not actions or all(a["op"] == "skip" for a in actions):
+        if not actions or all(a["op"] in ("skip",) + early for a in actions):
             result["actions"] += actions
             continue
-        removed = [a for a in actions if a["op"] == "remove_keywords"]
-        executed, created = _execute(app_id, page, snap, [a for a in actions if a["op"] != "remove_keywords"],
+        done = [a for a in actions if a["op"] in early]
+        executed, created = _execute(app_id, page, snap, [a for a in actions if a["op"] not in early],
                                      media, ctx, catalog, bearer, ledger, out)
-        result["actions"] += removed + executed
+        result["actions"] += done + executed
         if created is None:
             continue
         kind, created_id = created
@@ -443,6 +493,10 @@ def submit(app_id, doc, names, bearer, apply, ledger=NULL, out=print):
         version = snap["version"]
         if version is None or version["state"] not in SUBMITTABLE:
             raise review.SubmissionBlocked(f"'{name}' has nothing to submit (latest version {version and version['state']})")
+        if snap["visible"] and not snap["ever_live"]:
+            raise review.SubmissionBlocked(
+                f"'{name}' is visible but has never been approved — approval would start organic routing without "
+                f"`cpp publish`. Hide it first: asokit cpp publish --pages {shlex.quote(name)} --hide --apply")
         for locale, loc in version["localizations"].items():
             states = {p["state"] for p in loc["placements"]}
             if states & BAD_PLACEMENT:

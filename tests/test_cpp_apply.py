@@ -214,6 +214,44 @@ class PushTests(unittest.TestCase):
         result = self.push(pages=["Alpha", "Beta"])
         self.assertEqual(result["problems"], [])
 
+    def test_failed_hide_after_create_is_repaired_by_the_rerun(self):
+        self.fake.fail_on = ("PATCH", "/appCustomProductPages/")
+        with self.assertRaises(asc.ASCError):
+            self.push()
+        page_id = self.fake.page_named("BPD tracker")
+        self.assertTrue(self.fake.pages[page_id]["visible"])
+        self.fake.fail_on = None
+        self.lines.clear()
+        result = self.push()
+        self.assertFalse(self.fake.pages[page_id]["visible"])
+        self.assertEqual(result["actions"][0]["op"], "hide_page")
+        self.assertIn("hide_page", self.lines[0])
+        creates = [w for w in self.fake.writes() if w[:2] == ("POST", "/appCustomProductPages")]
+        self.assertEqual(len(creates), 1)
+        self.assertEqual(self.push()["actions"], [])
+
+    def test_visible_never_approved_page_is_hidden_first_even_in_review(self):
+        self.fake.add_page("BPD tracker", state="WAITING_FOR_REVIEW", visible=True,
+                           locales={"en-US": {"keywords": ["bpd"]}, "en-GB": {"keywords": ["bpd"]}})
+        page_id = self.fake.page_named("BPD tracker")
+        start = len(self.fake.writes())
+        result = self.push()
+        self.assertEqual([a["op"] for a in result["actions"]], ["hide_page", "skip"])
+        self.assertEqual(self.fake.writes()[start][:2], ("PATCH", f"/appCustomProductPages/{page_id}"))
+        self.assertFalse(self.fake.pages[page_id]["visible"])
+
+    def test_dry_run_reports_hide_without_writing(self):
+        self.fake.add_page("BPD tracker", state="PREPARE_FOR_SUBMISSION", visible=True)
+        result = self.push(apply=False)
+        self.assertEqual(result["actions"][0]["op"], "hide_page")
+        self.assertEqual(self.fake.writes(), [])
+
+    def test_visible_page_with_an_approved_version_is_not_hidden(self):
+        page_id, _, _ = self.fake.add_page("BPD tracker", state="APPROVED", visible=True)
+        self.fake._new_version(page_id, "PREPARE_FOR_SUBMISSION")
+        result = self.push(apply=False)
+        self.assertNotIn("hide_page", [a["op"] for a in result["actions"]])
+
     def test_create_patches_hidden_unless_response_says_hidden(self):
         self.fake.create_visible = None   # attribute missing/unknown in the response
         self.push()
@@ -335,6 +373,12 @@ class PublishSubmitTests(unittest.TestCase):
         for pid in search:
             self.fake.placements.pop(pid)
         with self.assertRaisesRegex(review.SubmissionBlocked, "creative.*search"):
+            cpp_apply.submit("1", self.doc, ["BPD tracker"], "t", apply=True, out=lambda line: None)
+        self.assertEqual(self.fake.submissions, {})
+
+    def test_submit_refuses_visible_never_approved_page(self):
+        self.fake.pages[self.page_id]["visible"] = True
+        with self.assertRaisesRegex(review.SubmissionBlocked, r"cpp publish --pages 'BPD tracker' --hide --apply"):
             cpp_apply.submit("1", self.doc, ["BPD tracker"], "t", apply=True, out=lambda line: None)
         self.assertEqual(self.fake.submissions, {})
 

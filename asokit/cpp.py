@@ -241,6 +241,10 @@ def _keyword_actions(name, locale, localization, wanted, current, live):
 
 def plan(page, snap, doc, creative_root="assets-out", locales=None, prune=False, creative_supported=True):
     name = page["name"]
+    if snap and snap.get("id") and snap.get("visible") and snap.get("ever_live") is False:
+        # Visible with no approved version: approval would start routing without publish.
+        hide = [{"op": "hide_page", "page": name, "page_id": snap["id"], "live": False}]
+        return hide + plan(page, dict(snap, visible=False), doc, creative_root, locales, prune, creative_supported)
     wanted = {loc: entry for loc, entry in page["locales"].items() if not locales or loc in locales}
     if snap is None or snap.get("version") is None:
         if snap is None:
