@@ -125,3 +125,107 @@ class Catalog:
                         lines.append(f"  {ptype:<32} {group:<40} max {limit.get('maxCount')}  "
                                      f"[{self.display_class(group)}]  {', '.join(specs) or '-'}")
         return lines
+
+
+REUSABLE = frozenset({"UPLOAD_COMPLETE", "COMPLETE", "PREPARE_FOR_SUBMISSION", "READY_FOR_REVIEW",
+                      "WAITING_FOR_REVIEW", "IN_REVIEW", "ACCEPTED", "APPROVED"})
+PROCESSED = REUSABLE - {"UPLOAD_COMPLETE"}
+TERMINAL_BAD = frozenset({"FAILED", "REJECTED", "ARCHIVED"})
+
+
+class RejectedAsset(asc.ASCError):
+    pass
+
+
+def reference_name(file_name, data):
+    sha = hashlib.sha256(data).hexdigest()[:16]
+    return f"asokit:{sha}:{Path(file_name).name[:40]}", sha
+
+
+def sha_of(reference):
+    """The content hash inside an asokit referenceName, else None."""
+    if reference and reference.startswith("asokit:"):
+        return reference.split(":")[1]
+    return None
+
+
+def library_id(app_id, bearer):
+    return asc.call("GET", f"/apps/{app_id}/assetLibrary", bearer)["data"]["id"]
+
+
+def find_reusable(library, reference, category, bearer):
+    rows = asc.call_all(
+        "GET",
+        f"/appAssetLibraries/{library}/images?filter[referenceName]={quote(reference, safe='')}"
+        f"&filter[category]={category}&limit=200",
+        bearer,
+    )
+    usable = [row for row in rows if row["attributes"].get("state") in REUSABLE]
+    if usable:
+        return usable[0]
+    if any(row["attributes"].get("state") == "REJECTED" for row in rows):
+        raise RejectedAsset(f"{reference}: this exact image was rejected by App Review — change it and re-render")
+    return None
+
+
+def upload_image(library, file_name, data, category, reference, bearer):
+    reserved = asc.call("POST", "/appAssetLibraryImages", bearer, {"data": {
+        "type": "appAssetLibraryImages",
+        "attributes": {"fileName": Path(file_name).name, "fileSize": len(data), "category": category, "referenceName": reference},
+        "relationships": {"assetLibrary": {"data": {"type": "appAssetLibraries", "id": library}}},
+    }})["data"]
+    for op in reserved["attributes"]["uploadOperations"]:
+        chunk = data[op["offset"]: op["offset"] + op["length"]]
+        asc._raw(op["method"], op["url"], {h["name"]: h["value"] for h in op.get("requestHeaders", [])}, chunk)
+    asc.call("PATCH", f"/appAssetLibraryImages/{reserved['id']}", bearer, {"data": {
+        "type": "appAssetLibraryImages", "id": reserved["id"], "attributes": {"uploaded": True},
+    }})
+    return reserved["id"]
+
+
+def wait_processed(library, ids, bearer, timeout_s=900):
+    """Batch-poll until every id is processed or terminally bad; backoff 5 → 30 s."""
+    states, pending = {}, set(ids)
+    delay, deadline = 5, time.time() + timeout_s
+    while pending:
+        ordered = sorted(pending)
+        for start in range(0, len(ordered), 50):
+            chunk = ",".join(ordered[start:start + 50])
+            for row in asc.call_all("GET", f"/appAssetLibraries/{library}/images?filter[id]={chunk}&limit=200", bearer):
+                attrs = row["attributes"]
+                states[row["id"]] = {"state": attrs.get("state"), "specId": attrs.get("specId"), "stateDetails": attrs.get("stateDetails")}
+        pending = {i for i in pending if states.get(i, {}).get("state") not in PROCESSED | TERMINAL_BAD}
+        if not pending or time.time() >= deadline:
+            break
+        time.sleep(delay)
+        delay = min(delay * 2, 30)
+    return states
+
+
+class Uploader:
+    """Upload-or-reuse, with an in-run cache keyed by (sha, category)."""
+
+    def __init__(self, library, bearer, apply):
+        self.library, self.bearer, self.apply = library, bearer, apply
+        self.cache = {}
+        self.new_ids = []
+
+    def ensure(self, file_name, data, category):
+        from .creative import png_info
+        reference, sha = reference_name(file_name, data)
+        info = png_info(data)
+        base = {"sha": sha, "name": Path(file_name).name, "width": info["width"], "height": info["height"]}
+        key = (sha, category)
+        if key in self.cache:
+            return dict(self.cache[key], **{k: base[k] for k in ("name",)})
+        row = find_reusable(self.library, reference, category, self.bearer)
+        if row:
+            result = dict(base, asset=row["id"], status="reused", specId=row["attributes"].get("specId"))
+        elif not self.apply:
+            result = dict(base, asset=f"new:{sha}", status="would-upload", specId=None)
+        else:
+            asset = upload_image(self.library, file_name, data, category, reference, self.bearer)
+            self.new_ids.append(asset)
+            result = dict(base, asset=asset, status="uploaded", specId=None)
+        self.cache[key] = result
+        return result
