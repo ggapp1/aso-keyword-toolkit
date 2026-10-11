@@ -101,7 +101,19 @@ class LintTests(unittest.TestCase):
 
     def test_word_boundaries(self):
         self.assertEqual(creative.lint("Offline patterns", "en-US"), [])
-        self.assertEqual(creative.lint("Treats yourself kindly", "en-US"), [])
+        self.assertEqual(creative.lint("Retreat and reset", "en-US"), [])
+        self.assertEqual(creative.lint("Predictable routines", "en-US"), [])
+
+    def test_third_person_claims_in_english(self):
+        for text in ["Detects episodes", "Predicts mania", "Prevents relapse", "Diagnoses bipolar",
+                     "Cures low moods", "Treats depression"]:
+            with self.subTest(text=text):
+                self.assertTrue(creative.lint(text, "en-US"))
+
+    def test_conservative_german_and_french_inflections(self):
+        self.assertTrue(creative.lint("Heilt Stimmungstiefs", "de-DE"))
+        self.assertTrue(creative.lint("Guérit la déprime", "fr-FR"))
+        self.assertEqual(creative.lint("Erkennt Muster", "de-DE"), [])
 
     def test_german_health_claim(self):
         self.assertTrue(creative.lint("Früherkennung von Episoden", "de-DE"))

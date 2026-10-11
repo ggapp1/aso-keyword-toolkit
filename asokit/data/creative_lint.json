@@ -11,19 +11,19 @@
     "en": {
       "pricing": ["free", "trial", "sale", "discount"],
       "rank": ["no. 1", "number one", "best", "top-rated", "award", "award-winning", "editor's choice", "app of the day", "apple design award"],
-      "health": ["diagnose", "diagnosis", "treat", "treatment", "cure", "prevent", "prevention", "predict", "detect", "early detection", "clinical-grade", "clinical grade", "clinically proven", "fda", "medical device", "doctor approved", "doctor recommended", "psychiatrist approved", "psychiatrist recommended", "therapist approved", "therapist recommended"],
+      "health": ["diagnose", "diagnoses", "diagnosis", "treat", "treats", "treatment", "cure", "cures", "prevent", "prevents", "prevention", "predict", "predicts", "detect", "detects", "early detection", "clinical-grade", "clinical grade", "clinically proven", "fda", "medical device", "doctor approved", "doctor recommended", "psychiatrist approved", "psychiatrist recommended", "therapist approved", "therapist recommended"],
       "distress": ["suicide", "self-harm", "self harm", "overdose", "crisis"]
     },
     "de": {
       "pricing": ["kostenlos", "gratis", "testversion", "angebot", "rabatt"],
       "rank": ["nr. 1", "nummer 1", "beste", "bester", "bestes", "testsieger", "auszeichnung", "preisgekrönt"],
-      "health": ["diagnose", "diagnostizieren", "behandeln", "behandlung", "heilen", "heilung", "vorbeugen", "verhindern", "vorhersagen", "früherkennung", "klinisch geprüft", "klinisch getestet", "medizinprodukt", "von ärzten empfohlen"],
+      "health": ["diagnose", "diagnostizieren", "behandeln", "behandlung", "heilen", "heilt", "heilung", "diagnostiziert", "vorbeugen", "verhindern", "vorhersagen", "früherkennung", "klinisch geprüft", "klinisch getestet", "medizinprodukt", "von ärzten empfohlen"],
       "distress": ["suizid", "selbstmord", "selbstverletzung", "überdosis", "krise"]
     },
     "fr": {
       "pricing": ["gratuit", "gratuite", "essai", "promo", "réduction", "soldes"],
       "rank": ["n°1", "n° 1", "numéro 1", "meilleur", "meilleure", "récompensé", "récompensée"],
-      "health": ["diagnostic", "diagnostiquer", "traiter", "traitement", "guérir", "guérison", "prévenir", "prédire", "détection précoce", "cliniquement prouvé", "dispositif médical", "recommandé par les médecins"],
+      "health": ["diagnostic", "diagnostiquer", "traiter", "traitement", "guérir", "guérit", "guérison", "prévenir", "prédire", "prédit", "détection précoce", "cliniquement prouvé", "dispositif médical", "recommandé par les médecins"],
       "distress": ["suicide", "automutilation", "surdose", "crise"]
     },
     "es": {
