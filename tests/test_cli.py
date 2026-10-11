@@ -1,3 +1,4 @@
+import csv
 import json
 import tempfile
 import unittest
@@ -287,10 +288,35 @@ class CppCommands(unittest.TestCase):
         self.assertIn("bpd;borderline", export.read_text())
 
     def test_submit_and_publish_require_pages(self):
-        with self.assertRaises(SystemExit):
-            self.run_cli("cpp", "submit", "--apply")
-        with self.assertRaises(SystemExit):
-            self.run_cli("cpp", "publish", "--apply")
+        for command in ("submit", "publish"):
+            with self.assertRaises(SystemExit) as caught:
+                self.run_cli("cpp", command, "--apply")
+            self.assertIn("--pages is required", str(caught.exception))
+        self.assertEqual(self.fake.log, [])
+
+    def test_push_apply_ads_export_has_ids_for_pages_created_in_the_run(self):
+        export = self.root / "ads.csv"
+        self.run_cli("cpp", "push", "--apply", "--ads-export", str(export))
+        with open(export, newline="", encoding="utf-8") as handle:
+            (row,) = list(csv.DictReader(handle))
+        self.assertEqual(row["page_name"], "BPD tracker")
+        self.assertTrue(row["page_id"])
+        self.assertTrue(row["page_url"])
+        self.assertTrue(row["latest_state"])
+
+    def test_submit_malformed_keywords_exits_cleanly_without_requests(self):
+        broken = cpp_page()
+        broken["locales"]["en-US"]["keywords"] = "bpd, borderline"
+        (self.root / "cpp.json").write_text(json.dumps({"pages": [broken]}))
+        with self.assertRaises(SystemExit) as caught:
+            self.run_cli("cpp", "submit", "--pages", "BPD tracker", "--apply")
+        self.assertIn("must be a list of strings", str(caught.exception))
+        self.assertEqual(self.fake.log, [])
+
+    def test_assets_status_survives_cpp_listing_failure(self):
+        self.fake.fail_on = ("GET", "/apps/1/appCustomProductPages")
+        text = self.run_cli("assets", "status")
+        self.assertIn("custom product pages: unavailable (injected failure", text)
 
     def test_assets_push_cpp_target_needs_editable_version(self):
         out = self.root / "assets-out" / "bpd"

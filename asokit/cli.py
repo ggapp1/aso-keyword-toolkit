@@ -1013,13 +1013,17 @@ def cmd_assets_status(args):
             rows = [p for p in library.surface_placements("appStoreVersionLocalization", loc_id, bearer)
                     if p["type"] in (library.HEADER, library.SEARCH)]
             print(f"  {locale:<8} {_placement_line(rows)}")
-    for row in cpp_apply.list_pages(app_id, bearer):
-        snap = cpp_apply.snapshot_page(row, bearer)
-        page_version = snap["version"] or {}
-        print(f"custom product page '{snap['name']}' ({page_version.get('state', 'no version')}):")
-        for locale, loc in sorted((page_version.get("localizations") or {}).items()):
-            rows = [p for p in loc["placements"] if p["type"] in (library.HEADER, library.SEARCH)]
-            print(f"  {locale:<8} {_placement_line(rows)}")
+    try:
+        for row in cpp_apply.list_pages(app_id, bearer):
+            snap = cpp_apply.snapshot_page(row, bearer)
+            page_version = snap["version"] or {}
+            print(f"custom product page '{snap['name']}' ({page_version.get('state', 'no version')}):")
+            for locale, loc in sorted((page_version.get("localizations") or {}).items()):
+                rows = [p for p in loc["placements"] if p["type"] in (library.HEADER, library.SEARCH)]
+                print(f"  {locale:<8} {_placement_line(rows)}")
+    except asc.ASCError as error:
+        first = (str(error).splitlines() or [""])[0]
+        print(f"custom product pages: unavailable ({first})")
 
 
 def _placement_line(rows):
@@ -1240,7 +1244,13 @@ def cmd_cpp_push(args):
         sys.exit(1)
     _report(result["problems"], result["warnings"])
     if args.ads_export:
-        _write_ads(args.ads_export, cpp.ads_rows(_expand(doc), result["context"]["snapshots"]))
+        snapshots = dict(result["context"]["snapshots"])
+        if args.apply:
+            # Pages created in this run have no id/url in the pre-push snapshots — re-read live state.
+            for row in cpp_apply.list_pages(app_id, bearer):
+                snap = cpp_apply.snapshot_page(row, bearer, with_media=False)
+                snapshots[snap["name"]] = snap
+        _write_ads(args.ads_export, cpp.ads_rows(_expand(doc), snapshots))
     if not result["actions"]:
         print("no changes — App Store Connect already matches cpp.json")
     print("\napplied — pages stay hidden until `asokit cpp publish`." if args.apply
@@ -1261,6 +1271,7 @@ def cmd_cpp_publish(args):
 def cmd_cpp_submit(args):
     names = _pages_arg(args, required=True)
     doc = _cpp_doc(args)
+    _expand(doc)  # malformed cpp.json exits cleanly before any request
     _, app_id = _require_app_id(args)
     book = ledger_module.for_config(_config_path(args), args.apply)
     try:
