@@ -892,7 +892,8 @@ def cmd_screenshots_status(args):
     else:
         version, report = asc.screenshots_status(app_id, asc.token())
     print(f"editable version: {version}")
-    print("\n".join(_format_status(report)))
+    for line in _format_status(report):
+        print(line)
 
 
 def cmd_screenshots_push(args):
@@ -964,9 +965,12 @@ def _screenshots_push_library(args, app_id, plan):
         sys.exit(f"{', '.join(missing)}: no localization on the editable version — push metadata for it first")
     catalog = library.Catalog.fetch(bearer)
     lib = library.library_id(app_id, bearer)
+    mirrored = set(args.mirror.split(",")) if args.mirror else set()
     requests = []
     for locale, families in sorted(plan.items()):
         for display, files in families.items():
+            if display in mirrored and locale != args.mirror_from:
+                continue   # mirror wins over local files (sets-engine semantics)
             requests.append({"locale": locale, "parent_kind": parent_kind, "parent_id": parents[locale],
                              "placement_types": [library.SCREENSHOT], "category": library.MEDIA,
                              "display_class": shots.LEGACY_DISPLAY_CLASS.get(display),
@@ -983,6 +987,10 @@ def _screenshots_push_library(args, app_id, plan):
             if not picked:
                 sys.exit(f"{args.mirror_from} has no {display} screenshots to mirror")
             group = picked[0]["group"]
+            groups = list(dict.fromkeys(r["group"] for r in picked))
+            if len(groups) > 1:
+                print(f"warning: {args.mirror_from} has {display} screenshots in {len(groups)} groups "
+                      f"({', '.join(groups)}); mirroring only {group}")
             assets = [{"asset": r["asset"], "sha": r["sha"], "name": r["asset"], "specId": None} for r in picked if r["group"] == group]
             for locale in sorted(plan):
                 if locale != args.mirror_from:
