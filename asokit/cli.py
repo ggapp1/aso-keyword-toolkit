@@ -1006,8 +1006,7 @@ def _screenshots_push_library(args, app_id, plan):
         library.sync_groups(requests, catalog, feature, lib, bearer, args.apply, ledger=book, command="screenshots push",
                             progress=lambda a: _print_actions([a]))
     except asc.ASCError as error:
-        print(f"\naborted — {error}\nRe-running is safe: uploads are reused and unchanged groups are skipped.", flush=True)
-        sys.exit(1)
+        _abort(error, "Re-running is safe: uploads are reused and unchanged groups are skipped.")
     print("\napplied — verify in App Store Connect before submitting." if args.apply else "\nDRY RUN — nothing written. Re-run with --apply to push.")
 
 
@@ -1032,6 +1031,17 @@ def _locales_filter(plan, locales):
         return plan
     wanted = set(locales.split(","))
     return {k: v for k, v in plan.items() if k in wanted}
+
+
+def _abort(error, rerun_hint):
+    """Print an aborted apply and exit 1. A rejected image is not a transient
+    failure — re-running uploads the same bytes and fails the same way."""
+    if isinstance(error, library.RejectedAsset):
+        print(f"\naborted — {error}\nRe-running with the same image will fail the same way: "
+              "change the image (edit and re-render it), then push again.", flush=True)
+    else:
+        print(f"\naborted — {error}\n{rerun_hint}", flush=True)
+    sys.exit(1)
 
 
 def _print_actions(actions):
@@ -1174,8 +1184,7 @@ def cmd_assets_push(args):
         actions = library.sync_groups(requests, catalog, feature, lib, bearer, args.apply, ledger=book,
                                       command="assets push", progress=lambda a: _print_actions([a]))
     except asc.ASCError as error:
-        print(f"\naborted — {error}\nRe-running is safe: uploads are reused and unchanged groups are skipped.", flush=True)
-        sys.exit(1)
+        _abort(error, "Re-running is safe: uploads are reused and unchanged groups are skipped.")
     unsupported = [a for a in actions if a["mode"] == "unsupported"]
     if unsupported:
         print(f"note: {len(unsupported)} placement(s) skipped — the catalog has no such type under {feature}")
@@ -1323,8 +1332,7 @@ def cmd_cpp_push(args):
                                 prune=args.prune, allow_protected=_csv_list(args.allow_protected),
                                 lint=not args.no_lint, ledger=book, out=print)
     except asc.ASCError as error:
-        print(f"\naborted — {error}\nRe-running is safe: every step re-diffs against live state.", flush=True)
-        sys.exit(1)
+        _abort(error, "Re-running is safe: every step re-diffs against live state.")
     _report(result["problems"], result["warnings"])
     if args.ads_export:
         snapshots = dict(result["context"]["snapshots"])

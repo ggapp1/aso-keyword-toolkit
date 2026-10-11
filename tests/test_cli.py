@@ -335,6 +335,30 @@ class CppCommands(unittest.TestCase):
             cli.main(["--config", str(self.root / "asokit.json"), "cpp", "check", "--offline"])
         self.assertIn("must be a list of strings", buffer.getvalue())
 
+    def run_cli_aborting(self, *argv):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer), self.assertRaises(SystemExit):
+            cli.main(["--config", str(self.root / "asokit.json"), *argv])
+        return buffer.getvalue()
+
+    def test_rejected_asset_abort_says_change_the_image_not_rerun(self):
+        rejected = cli.library.RejectedAsset("asokit:abc: this exact image was rejected by App Review — change it and re-render")
+        with mock.patch.object(cli.cpp_apply, "push", side_effect=rejected):
+            text = self.run_cli_aborting("cpp", "push", "--apply")
+        self.assertIn("change the image", text)
+        self.assertNotIn("Re-running is safe", text)
+        self.run_cli("cpp", "push", "--apply")
+        out = self.root / "assets-out" / "bpd"
+        with mock.patch.object(cli.library, "sync_groups", side_effect=rejected):
+            text = self.run_cli_aborting("assets", "push", str(out), "--target", "cpp:BPD tracker", "--locales", "en-US", "--apply")
+        self.assertIn("change the image", text)
+        self.assertNotIn("Re-running is safe", text)
+
+    def test_other_abort_still_says_rerun_is_safe(self):
+        with mock.patch.object(cli.cpp_apply, "push", side_effect=cli.asc.ASCError("boom")):
+            text = self.run_cli_aborting("cpp", "push", "--apply")
+        self.assertIn("Re-running is safe", text)
+
     def test_assets_status_lists_cpp_pages_without_editable_app_version(self):
         self.run_cli("cpp", "push", "--apply")
         self.fake.versions[:] = [v for v in self.fake.versions if v["id"] == "v0"]
