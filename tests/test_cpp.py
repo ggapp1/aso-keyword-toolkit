@@ -147,5 +147,113 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(any("review" in w.lower() for w in warnings))
 
 
+
+from asokit.library import reference_name
+
+
+def live_snap(doc, state="APPROVED", keywords=("bpd", "borderline"), promo="Log mood swings and triggers.",
+              media=True, deep_link=None, locales=("en-US",)):
+    root = doc["_root"]
+
+    def placements(loc):
+        if not media:
+            return []
+        rows = []
+        for n, name in enumerate(("06-entry.png", "02-stats.png")):
+            data = (root / "shots" / "en-US" / name).read_bytes()
+            rows.append({"id": f"p{n}-{loc}", "type": "APP_SCREENSHOT", "group": "G_IPHONE_L", "state": "PARENT_APPROVED",
+                         "asset": f"a{n}", "sha": reference_name(name, data)[1]})
+        data = (root / "assets-out" / "bpd" / f"{loc}.png").read_bytes() if (root / "assets-out" / "bpd" / f"{loc}.png").exists() else b"x"
+        sha = reference_name(f"{loc}.png", data)[1]
+        rows += [{"id": f"ph-{loc}", "type": "PRODUCT_PAGE_HEADER_ASSET", "group": "G_HEADER", "state": "PARENT_APPROVED", "asset": "c", "sha": sha},
+                 {"id": f"ps-{loc}", "type": "APP_STORE_SEARCH_RESULTS_ASSET", "group": "G_SEARCH", "state": "PARENT_APPROVED", "asset": "c", "sha": sha}]
+        return rows
+
+    return {"id": "page1", "name": "BPD tracker", "url": "https://apps.apple.com/x?ppid=1", "visible": True,
+            "version": {"id": "ver1", "state": state, "deepLink": deep_link, "localizations": {
+                loc: {"id": f"loc-{loc}", "promotionalText": promo, "keywords": {k: k for k in keywords},
+                      "placements": placements(loc)} for loc in locales}}}
+
+
+class PlanTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.doc = make_doc(self.tmp.name, [page(extra_locales={"en-GB": {"same": "en-US", "keywords": ["bpd", "borderline"]}})])
+        self.page = cpp.expand(self.doc)[0]
+
+    def ops(self, actions):
+        return [a["op"] for a in actions]
+
+    def test_missing_page_creates_then_previews_editable_work(self):
+        actions = cpp.plan(self.page, None, self.doc)
+        self.assertEqual(actions[0]["op"], "create_page")
+        self.assertTrue(actions[0]["template"])
+        self.assertEqual(set(actions[0]["locales"]), {"en-US", "en-GB"})
+        self.assertIn("add_keywords", self.ops(actions))
+        self.assertIn("sync_media", self.ops(actions))
+
+    def test_live_unchanged_page_plans_nothing(self):
+        snap = live_snap(self.doc, locales=("en-US", "en-GB"))
+        self.assertEqual(cpp.plan(self.page, snap, self.doc), [])
+
+    def test_live_promo_and_keyword_change_is_in_place(self):
+        snap = live_snap(self.doc, keywords=("bpd",), promo="Old text", locales=("en-US", "en-GB"))
+        actions = cpp.plan(self.page, snap, self.doc)
+        self.assertNotIn("create_version", self.ops(actions))
+        self.assertTrue(all(a["live"] for a in actions))
+        self.assertEqual(sorted(self.ops(actions)), ["add_keywords", "add_keywords", "update_promo", "update_promo"])
+
+    def test_live_media_change_needs_a_new_version(self):
+        snap = live_snap(self.doc, media=False, locales=("en-US", "en-GB"))
+        actions = cpp.plan(self.page, snap, self.doc)
+        self.assertEqual(self.ops(actions), ["create_version"])
+
+    def test_live_new_locale_needs_a_new_version(self):
+        snap = live_snap(self.doc, locales=("en-US",))
+        self.assertEqual(self.ops(cpp.plan(self.page, snap, self.doc)), ["create_version"])
+
+    def test_in_review_is_skipped(self):
+        snap = live_snap(self.doc, state="IN_REVIEW", locales=("en-US", "en-GB"))
+        self.assertEqual(self.ops(cpp.plan(self.page, snap, self.doc)), ["skip"])
+
+    def test_editable_version_full_diff(self):
+        snap = live_snap(self.doc, state="PREPARE_FOR_SUBMISSION", keywords=("bpd", "symptom"), media=False, locales=("en-US",))
+        actions = cpp.plan(self.page, snap, self.doc)
+        ops = self.ops(actions)
+        self.assertIn("create_localization", ops)
+        self.assertIn("remove_keywords", ops)
+        self.assertEqual(ops.count("sync_media"), 2)
+        self.assertFalse(any(a["live"] for a in actions))
+
+    def test_locales_scope_never_deletes(self):
+        snap = live_snap(self.doc, state="PREPARE_FOR_SUBMISSION", locales=("en-US", "en-GB", "en-AU"))
+        actions = cpp.plan(self.page, snap, self.doc, locales=["en-GB"], prune=True)
+        self.assertNotIn("delete_localization", self.ops(actions))
+        self.assertTrue(all(a.get("locale") in (None, "en-GB") for a in actions))
+
+    def test_prune_deletes_but_never_the_last_localization(self):
+        snap = live_snap(self.doc, state="PREPARE_FOR_SUBMISSION", locales=("en-US", "en-GB", "en-AU"))
+        actions = cpp.plan(self.page, snap, self.doc, prune=True)
+        self.assertEqual([a["locale"] for a in actions if a["op"] == "delete_localization"], ["en-AU"])
+        lone = cpp.expand(make_doc(tempfile.mkdtemp(), [page()]))[0]
+        lone["locales"] = {}
+        actions = cpp.plan(lone, live_snap(self.doc, state="PREPARE_FOR_SUBMISSION", locales=("en-AU",)), self.doc, prune=True)
+        self.assertNotIn("delete_localization", self.ops(actions))
+
+    def test_creative_ignored_when_unsupported(self):
+        snap = live_snap(self.doc, locales=("en-US", "en-GB"))
+        for loc in snap["version"]["localizations"].values():
+            loc["placements"] = [p for p in loc["placements"] if p["type"] == "APP_SCREENSHOT"]
+        self.assertEqual(cpp.plan(self.page, snap, self.doc, creative_supported=False), [])
+
+    def test_ads_rows(self):
+        snap = live_snap(self.doc, locales=("en-US", "en-GB"))
+        rows = cpp.ads_rows([self.page], {"BPD tracker": snap})
+        self.assertEqual({r["locale"] for r in rows}, {"en-US", "en-GB"})
+        self.assertEqual(rows[0]["page_id"], "page1")
+        self.assertEqual(rows[0]["keywords"], "bpd;borderline")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -176,3 +176,125 @@ def check(doc, creative_root="assets-out", allow_protected=(), lint=True, online
     if total > MAX_PAGES:
         problems.append(f"{total} custom product pages (live + file) — App Store Connect allows {MAX_PAGES}")
     return problems, warnings
+
+
+def desired_media(doc, entry, locale, creative_root):
+    screenshots = []
+    for shot in entry["screenshots"]:
+        screenshots.append([reference_name(p.name, p.read_bytes())[1] for p in select_screenshots(shot, doc["_root"])])
+    creative_sha = None
+    if entry.get("creative"):
+        path = creative_path(doc, creative_root, entry["creative"], locale)
+        creative_sha = reference_name(path.name, path.read_bytes())[1]
+    return screenshots, creative_sha
+
+
+def media_differs(media, placements, creative_supported):
+    screenshots, creative_sha = media
+    groups = {}
+    for row in placements:
+        groups.setdefault((row["type"], row["group"]), []).append(row.get("sha") or row.get("asset"))
+    current_shots = [seq for (ptype, _), seq in groups.items() if ptype == SCREENSHOT]
+    if any(seq not in current_shots for seq in screenshots):
+        return True
+    if creative_sha and creative_supported:
+        creative_groups = [seq for (ptype, _), seq in groups.items() if ptype in (HEADER, SEARCH)]
+        if not creative_groups or any(seq != [creative_sha] for seq in creative_groups):
+            return True
+    return False
+
+
+def _keyword_actions(name, locale, localization, wanted, current, live):
+    wanted_set = {norm(k) for k in wanted}
+    current_set = set(current)
+    actions = []
+    add = sorted(wanted_set - current_set)
+    remove = sorted(current_set - wanted_set)
+    if add:
+        actions.append({"op": "add_keywords", "page": name, "locale": locale, "localization": localization, "keywords": add, "live": live})
+    if remove:
+        actions.append({"op": "remove_keywords", "page": name, "locale": locale, "localization": localization, "keywords": remove, "live": live})
+    return actions
+
+
+def plan(page, snap, doc, creative_root="assets-out", locales=None, prune=False, creative_supported=True):
+    name = page["name"]
+    wanted = {loc: entry for loc, entry in page["locales"].items() if not locales or loc in locales}
+    if snap is None or snap.get("version") is None:
+        if snap is None:
+            actions = [{"op": "create_page", "page": name, "deepLink": page["deepLink"], "live": False,
+                        "template": page["template"] == "appStoreVersion",
+                        "locales": {loc: entry.get("promotionalText") for loc, entry in sorted(wanted.items())}}]
+            synthetic = {"id": None, "name": name, "url": None, "visible": False, "version": {
+                "id": None, "state": "PREPARE_FOR_SUBMISSION", "deepLink": page["deepLink"],
+                "localizations": {loc: {"id": None, "promotionalText": entry.get("promotionalText"), "keywords": {}, "placements": []}
+                                  for loc, entry in wanted.items()}}}
+            return actions + plan(page, synthetic, doc, creative_root, locales, prune, creative_supported)
+        return [{"op": "create_version", "page": name, "page_id": snap["id"], "deepLink": page["deepLink"], "live": False}]
+
+    version = snap["version"]
+    state = version["state"]
+    if state in LOCKED:
+        return [{"op": "skip", "page": name, "reason": f"version {state} — in review; re-run after review", "live": False}]
+    current = version["localizations"]
+    media = {loc: desired_media(doc, entry, loc, creative_root) for loc, entry in wanted.items()}
+    deep_link_changed = (page["deepLink"] or None) != (version.get("deepLink") or None)
+    extras = [loc for loc in current if loc not in page["locales"]] if (prune and not locales) else []
+
+    if state in LIVE:
+        actions = []
+        for loc, entry in sorted(wanted.items()):
+            if loc not in current:
+                continue
+            here = current[loc]
+            if (entry.get("promotionalText") or "") != (here.get("promotionalText") or ""):
+                actions.append({"op": "update_promo", "page": name, "locale": loc, "localization": here["id"],
+                                "promotionalText": entry.get("promotionalText") or "", "live": True})
+            actions += _keyword_actions(name, loc, here["id"], entry["keywords"], here["keywords"], live=True)
+        needs_version = (deep_link_changed or extras
+                         or any(loc not in current for loc in wanted)
+                         or any(media_differs(media[loc], current[loc]["placements"], creative_supported) for loc in wanted if loc in current))
+        if needs_version:
+            actions.append({"op": "create_version", "page": name, "page_id": snap["id"], "deepLink": page["deepLink"], "live": False})
+        return actions
+
+    actions = []
+    if deep_link_changed and version["id"]:
+        actions.append({"op": "update_deep_link", "page": name, "version": version["id"], "deepLink": page["deepLink"], "live": False})
+    for loc, entry in sorted(wanted.items()):
+        here = current.get(loc)
+        if here is None:
+            actions.append({"op": "create_localization", "page": name, "version": version["id"], "locale": loc,
+                            "promotionalText": entry.get("promotionalText") or "", "live": False})
+            here = {"id": None, "keywords": {}, "placements": []}
+        elif (entry.get("promotionalText") or "") != (here.get("promotionalText") or ""):
+            actions.append({"op": "update_promo", "page": name, "locale": loc, "localization": here["id"],
+                            "promotionalText": entry.get("promotionalText") or "", "live": False})
+        actions += _keyword_actions(name, loc, here["id"], entry["keywords"], here["keywords"], live=False)
+        if media_differs(media[loc], here["placements"], creative_supported):
+            actions.append({"op": "sync_media", "page": name, "locale": loc, "localization": here["id"], "live": False})
+    created = sum(1 for a in actions if a["op"] == "create_localization")
+    if extras and len(current) - len(extras) + created >= 1:
+        for loc in sorted(extras):
+            actions.append({"op": "delete_localization", "page": name, "locale": loc, "localization": current[loc]["id"], "live": False})
+    return actions
+
+
+def ads_rows(pages, snapshots):
+    rows = []
+    names = [p["name"] for p in pages] + sorted(n for n in snapshots if n not in {p["name"] for p in pages})
+    by_name = {p["name"]: p for p in pages}
+    for name in names:
+        snap = snapshots.get(name) or {}
+        version = snap.get("version") or {}
+        page = by_name.get(name)
+        locales = sorted(set((page or {}).get("locales", {})) | set(version.get("localizations", {})))
+        for loc in locales:
+            if page and loc in page["locales"]:
+                keywords = [norm(k) for k in page["locales"][loc]["keywords"]]
+            else:
+                keywords = sorted(version["localizations"][loc]["keywords"])
+            rows.append({"page_name": name, "page_id": snap.get("id") or "", "page_url": snap.get("url") or "",
+                         "visible": snap.get("visible", ""), "latest_state": version.get("state", ""), "locale": loc,
+                         "keywords": ";".join(keywords), "deep_link": (page or {}).get("deepLink") or version.get("deepLink") or ""})
+    return rows
