@@ -89,6 +89,55 @@ def token():
     )
 
 
+class Bearer:
+    """A JWT that re-mints itself before it expires.
+
+    Long pushes (39 locales of uploads plus processing waits) outlive the
+    20-minute token. Every request formats the bearer with `f"Bearer {b}"`,
+    which calls `__str__`, so passing a `Bearer` anywhere a token string is
+    accepted keeps the run authenticated without threading re-mint calls
+    through every loop. Tests keep passing plain strings.
+    """
+
+    REFRESH_MARGIN = 180
+
+    def __init__(self, mint=None, lifetime=20 * 60):
+        self._mint = mint or token
+        self._lifetime = lifetime
+        self._value = None
+        self._expires = 0.0
+
+    def __str__(self):
+        now = time.time()
+        if self._value is None or now >= self._expires - self.REFRESH_MARGIN:
+            self._value = self._mint()
+            self._expires = now + self._lifetime
+        return self._value
+
+
+# Apple reports the rolling hourly budget on every response:
+#   X-Rate-Limit: user-hour-lim:3500;user-hour-rem:3120;
+RATE = {}
+RATE_FLOOR = 0.10
+RATE_PAUSE = 30
+
+
+def _note_rate(header):
+    fields = dict(part.split(":", 1) for part in (header or "").split(";") if ":" in part)
+    try:
+        limit, remaining = int(fields["user-hour-lim"]), int(fields["user-hour-rem"])
+    except (KeyError, ValueError):
+        return
+    RATE["limit"], RATE["remaining"] = limit, remaining
+
+
+def _throttle():
+    """Pause when the hourly budget is nearly spent, instead of hitting 429s."""
+    limit, remaining = RATE.get("limit"), RATE.get("remaining")
+    if limit and remaining is not None and remaining < limit * RATE_FLOOR:
+        time.sleep(RATE_PAUSE)
+
+
 RATE_LIMITED = 429
 TRANSIENT_SERVER_ERRORS = frozenset({500, 502, 503, 504})
 MAX_ATTEMPTS = 4
@@ -122,6 +171,7 @@ def _request(method, path, bearer, body=None):
     if body:
         request.add_header("Content-Type", "application/json")
     with urllib.request.urlopen(request, timeout=30) as response:
+        _note_rate(response.headers.get("X-Rate-Limit"))
         raw = response.read().decode()
         return json.loads(raw) if raw else {}
 
@@ -130,6 +180,7 @@ def call(method, path, bearer, body=None):
     """One request, retrying rate limits (any method) and 5xx (GET only)."""
     url = path if path.startswith("http") else f"{API}{path}"
     for attempt in range(MAX_ATTEMPTS):
+        _throttle()
         try:
             return _request(method, path, bearer, body)
         except urllib.error.HTTPError as error:
