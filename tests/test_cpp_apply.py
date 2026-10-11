@@ -317,6 +317,15 @@ class PublishSubmitTests(unittest.TestCase):
             cpp_apply.submit("1", doc, ["BPD tracker"], "t", apply=True, out=lambda line: None)
         self.assertEqual(self.fake.submissions, {})
 
+    def test_submit_refuses_declared_creative_without_search_placement(self):
+        search = [pid for pid, p in self.fake.placements.items() if p["group"] == "G_SEARCH"]
+        self.assertTrue(search)
+        for pid in search:
+            self.fake.placements.pop(pid)
+        with self.assertRaisesRegex(review.SubmissionBlocked, "creative.*search"):
+            cpp_apply.submit("1", self.doc, ["BPD tracker"], "t", apply=True, out=lambda line: None)
+        self.assertEqual(self.fake.submissions, {})
+
     def test_submit_dry_run_happy_path(self):
         result = cpp_apply.submit("1", self.doc, ["BPD tracker"], "t", apply=False, out=lambda line: None)
         self.assertEqual([i[0] for i in result["add"]], ["appCustomProductPageVersion"])

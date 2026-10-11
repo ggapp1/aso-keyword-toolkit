@@ -405,8 +405,9 @@ BAD_PLACEMENT = frozenset({"ASSET_PROCESSING", "FAILED"})
 def _check_declared(name, file_page, localizations, catalog, creative_supported):
     """Every locale the file declares for this page must exist on the version
     with the declared media placed: one screenshot placement per declared
-    display family (matched by catalog display class) and a header placement
-    when a creative is declared and the catalog supports it."""
+    display family (matched by catalog display class) and both a header and a
+    search placement when a creative is declared and the catalog supports
+    them (the same condition push uses to place creatives)."""
     if not file_page:
         return
     for locale, declared in sorted(file_page.get("locales", {}).items()):
@@ -418,8 +419,12 @@ def _check_declared(name, file_page, localizations, catalog, creative_supported)
             wanted = shots.LEGACY_DISPLAY_CLASS.get(entry.get("display"))
             if wanted is None or wanted not in shot_classes:
                 raise review.SubmissionBlocked(f"'{name}' {locale}: the file declares {entry.get('display')} screenshots but none are placed — run cpp push")
-        if declared.get("creative") and creative_supported and not any(p["type"] == library.HEADER for p in loc["placements"]):
-            raise review.SubmissionBlocked(f"'{name}' {locale}: the file declares a creative but none is placed — run cpp push")
+        if declared.get("creative") and creative_supported:
+            placed = {p["type"] for p in loc["placements"]}
+            for ptype, label in ((library.HEADER, "header"), (library.SEARCH, "search")):
+                if ptype not in placed:
+                    raise review.SubmissionBlocked(f"'{name}' {locale}: the file declares a creative but no {label} "
+                                                   "placement is on the version — run cpp push")
 
 
 def submit(app_id, doc, names, bearer, apply, ledger=NULL, out=print):
@@ -428,7 +433,7 @@ def submit(app_id, doc, names, bearer, apply, ledger=NULL, out=print):
     # item stops us before any snapshot work.
     review.preflight(app_id, bearer, {"appCustomProductPageVersion"})
     catalog = library.Catalog.fetch(bearer)
-    supported = catalog.supports(FEATURE, library.HEADER)
+    supported = catalog.supports(FEATURE, library.HEADER) and catalog.supports(FEATURE, library.SEARCH)
     pages = {p["name"]: p for p in cpp.expand(doc)}
     rows = list_pages(app_id, bearer)
     items = []
