@@ -41,8 +41,10 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-# Only needed for `asokit metadata push` / `status`. Research needs nothing.
+# Only needed for App Store Connect sync. Research needs nothing.
 connect = ["pyjwt>=2.0", "cryptography>=3.4"]
+# Only needed for `asokit assets render`.
+render = ["Pillow>=10.1"]
 
 [project.urls]
 Homepage = "https://github.com/ggapp1/aso-keyword-toolkit"
@@ -53,3 +55,6 @@ asokit = "asokit.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["asokit*"]
+
+[tool.setuptools.package-data]
+asokit = ["data/*.json"]
