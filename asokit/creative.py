@@ -28,7 +28,11 @@ def plan_from_directory(directory):
 
 def png_info(source):
     data = source if isinstance(source, (bytes, bytearray)) else Path(source).read_bytes()
-    if data[:8] != SIGNATURE or data[12:16] != b"IHDR":
+    if data[:8] != SIGNATURE:
+        raise ValueError("not a PNG")
+    if len(data) < 33:  # signature + IHDR length/type + 13-byte body + CRC
+        raise ValueError("truncated PNG (no complete IHDR chunk)")
+    if data[12:16] != b"IHDR":
         raise ValueError("not a PNG")
     width, height, bit_depth, colour_type = struct.unpack(">IIBB", data[16:26])
     has_trns, offset = False, 8
@@ -40,6 +44,14 @@ def png_info(source):
             break
         offset += 12 + length
     return {"width": width, "height": height, "bit_depth": bit_depth, "colour_type": colour_type, "has_trns": has_trns}
+
+
+_COLOUR_TYPES = {
+    0: "grayscale",
+    3: "palette (indexed colour)",
+    4: "grayscale with alpha",
+    6: "RGBA (has an alpha channel)",
+}
 
 
 def check(plan, expected=UNIVERSAL, max_bytes=None):
@@ -55,10 +67,11 @@ def check(plan, expected=UNIVERSAL, max_bytes=None):
             problems.append(f"{locale}: {Path(path).name} is {info['width']}×{info['height']}, expected {expected[0]}×{expected[1]}")
         if info["bit_depth"] != 8:
             problems.append(f"{locale}: {Path(path).name} is {info['bit_depth']}-bit, expected 8-bit")
-        if info["colour_type"] in (0, 4):
-            problems.append(f"{locale}: {Path(path).name} is grayscale, expected RGB")
-        if info["colour_type"] == 6 or (info["colour_type"] == 3 and info["has_trns"]):
-            problems.append(f"{locale}: {Path(path).name} has an alpha channel/transparency — App Store creatives can't")
+        if info["colour_type"] != 2:
+            kind = _COLOUR_TYPES.get(info["colour_type"], f"PNG colour type {info['colour_type']}")
+            problems.append(f"{locale}: {Path(path).name} is {kind}, expected 8-bit RGB (colour type 2) without alpha")
+        if info["has_trns"]:
+            problems.append(f"{locale}: {Path(path).name} has a tRNS transparency chunk — App Store creatives can't be transparent")
         if max_bytes and Path(path).stat().st_size > max_bytes:
             problems.append(f"{locale}: {Path(path).name} exceeds {max_bytes} bytes")
     return problems

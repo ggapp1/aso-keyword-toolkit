@@ -43,20 +43,46 @@ class CheckTests(unittest.TestCase):
             problems = creative.check(self._plan(tmp, width=3840, height=1646))
             self.assertTrue(any("3840×1646" in p for p in problems))
 
-    def test_rejects_alpha_grayscale_palette_with_trns_and_16_bit(self):
-        cases = [dict(colour_type=6), dict(colour_type=4), dict(colour_type=0),
-                 dict(colour_type=3, trns=True), dict(colour_type=2, bit_depth=16)]
-        for case in cases:
+    def test_rejects_non_rgb_colour_types_and_16_bit(self):
+        cases = [(dict(colour_type=6), "RGBA"),
+                 (dict(colour_type=4), "grayscale with alpha"),
+                 (dict(colour_type=0), "is grayscale,"),
+                 (dict(colour_type=3), "palette"),
+                 (dict(colour_type=3, trns=True), "tRNS"),
+                 (dict(colour_type=2, bit_depth=16), "16-bit")]
+        for case, expected in cases:
             with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
-                self.assertTrue(creative.check(self._plan(tmp, width=5244, height=2950, **case)))
+                problems = creative.check(self._plan(tmp, width=5244, height=2950, **case))
+                self.assertTrue(any(expected in p for p in problems), problems)
 
-    def test_accepts_palette_without_trns(self):
+    def test_rejects_palette(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertEqual(creative.check(self._plan(tmp, width=5244, height=2950, colour_type=3)), [])
+            problems = creative.check(self._plan(tmp, width=5244, height=2950, colour_type=3))
+            self.assertEqual(len(problems), 1)
+            self.assertIn("palette", problems[0])
+
+    def test_rejects_rgb_with_trns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            problems = creative.check(self._plan(tmp, width=5244, height=2950, colour_type=2, trns=True))
+            self.assertEqual(len(problems), 1)
+            self.assertIn("tRNS", problems[0])
+
+    def test_truncated_png_is_a_problem_not_a_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "en-US.png"
+            path.write_bytes(png_bytes(5244, 2950)[:20])
+            problems = creative.check({"en-US": path})
+            self.assertEqual(len(problems), 1)
+            self.assertIn("truncated", problems[0])
+
+    def test_png_info_rejects_short_data(self):
+        with self.assertRaises(ValueError):
+            creative.png_info(png_bytes(5244, 2950)[:32])
 
     def test_max_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertTrue(creative.check(self._plan(tmp, width=5244, height=2950), max_bytes=10))
+            problems = creative.check(self._plan(tmp, width=5244, height=2950), max_bytes=10)
+            self.assertTrue(any("exceeds 10 bytes" in p for p in problems), problems)
 
 
 class LintTests(unittest.TestCase):
