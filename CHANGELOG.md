@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.5.0
+
+App Store creatives, custom product pages and featuring nominations, all built
+on Apple's App Store Asset Library. Every write is a dry run unless `--apply`.
+
+- **`asokit assets render / status / push / submit`** — render the universal
+  5244 × 2950 header and search-results creative from `assets.json` (needs the
+  new `render` extra, Pillow ≥ 10.1), with text and devices kept inside the
+  intersection of Apple's 21:9 and 3:2 crops and a rejection lint on headline
+  copy. A locale that cannot fit or fails the lint fails alone. `push` places
+  the creative on the default page's editable version or on a custom product
+  page; `submit` sends creatives to App Review on their own.
+- **Asset Library engine** — uploads are reused by content hash, everything in
+  scope is uploaded and processed before any surface is touched, group limits
+  are checked before writing, and nothing is ever deleted from the library.
+  Pushes to the default page refuse while a product page optimization test is
+  running.
+- **`asokit cpp check / status / push / submit / publish`** — custom product
+  pages from a declarative `cpp.json`, with per-locale keyword ownership and
+  protected keywords. Pages are created hidden; promo text and keywords on a
+  live page are edited in place, media and deep-link changes open a new
+  version; `submit` and `publish` are separate explicit steps, so organic
+  routing never changes implicitly. `--ads-export` writes a page/keyword CSV
+  for Apple Ads ad groups.
+- **`asokit nominations check / push`** — featuring nominations from
+  `nominations.json`, created as drafts; `--submit --name N` submits exactly
+  one. Dates need 14 days' notice unless `--force`.
+- **`asokit screenshots push / status --engine library`** (opt-in) — the same
+  screenshot workflow through the Asset Library: diffs instead of rewriting,
+  and mirrors by asset id instead of re-uploading. `--engine sets` stays the
+  default until status parity and one verified full push.
+- **Ledger** — every applied write appends a line to `asokit-ledger.jsonl`
+  next to `asokit.json`, so App Analytics can be lined up with the date a
+  page, keyword or creative actually went live. Dry runs write nothing.
+- **Long runs stay authenticated and under the rate limit.** `asc.Bearer`
+  re-mints the JWT before it expires, including inside processing waits, and
+  requests pause when `X-Rate-Limit` shows less than 10 % of the hourly
+  budget left.
+
 ## 0.4.0
 
 Everything here comes from a field report on taking a live app from 9 App

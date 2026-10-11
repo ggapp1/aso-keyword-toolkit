@@ -543,9 +543,9 @@ cut off. `assets.json` lives next to `asokit.json` by default:
     "ar-SA": {"path": "/System/Library/Fonts/SFArabic.ttf", "variation": "Bold"}
   },
   "noSpaceWrap": ["ja", "zh-Hans", "zh-Hant"],
-  "type": {"verb": {"size": 520, "min": 300, "step": 10, "lines": 1, "leading": 1.02},
-           "descriptor": {"size": 250, "min": 170, "step": 6, "lines": 2, "leading": 1.12},
-           "tight": {"verb": 340, "descriptor": 190}},
+  "type": {"verb": {"size": 360, "min": 220, "step": 10, "lines": 2, "leading": 1.02},
+           "descriptor": {"size": 220, "min": 150, "step": 6, "lines": 2, "leading": 1.12},
+           "tight": {"verb": 260, "descriptor": 170}},
   "variants": {
     "default": {
       "captures": ["{ui}/01-log-home.png", "{ui}/03-stats-insights.png"],
@@ -562,11 +562,8 @@ cut off. `assets.json` lives next to `asokit.json` by default:
 }
 ```
 
-`type` is optional. Without it the defaults are verb `{size 360, min 220,
-step 10, lines 2, leading 1.02}`, descriptor `{size 220, min 150, step 6,
-lines 2, leading 1.12}` and tight thresholds `{verb 260, descriptor 170}`.
-Overrides merge per key, so `{"verb": {"size": 400}}` changes the size and
-keeps the rest. Fonts are keyed by locale with `default` covering the rest.
+`type` is optional; the values shown are the defaults. Overrides merge per
+key, so `{"verb": {"size": 400}}` changes the size and keeps the rest. Fonts are keyed by locale with `default` covering the rest.
 
 Headlines come either inline (`[verb, descriptor]` or `{"same": locale}`) or
 from a headlines file via `from`, where `slot` is an index or a named slot and
