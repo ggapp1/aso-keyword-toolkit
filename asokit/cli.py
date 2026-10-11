@@ -1373,7 +1373,8 @@ def _nominations_doc(args):
 
 
 def cmd_nominations_check(args):
-    problems, warnings = nominations.check(_nominations_doc(args), force=args.force)
+    config = load_config(args.config) if Path(args.config).exists() else {}
+    problems, warnings = nominations.check(_nominations_doc(args), force=args.force, app_id=_app_id(args, config))
     _report(problems, warnings)
     print("ok")
 
@@ -1382,9 +1383,9 @@ def cmd_nominations_push(args):
     doc = _nominations_doc(args)
     if args.submit and not (args.name and args.apply):
         sys.exit("--submit needs --name NAME and --apply — nominations are submitted one at a time")
-    problems, warnings = nominations.check(doc, force=args.force)
-    _report(problems, warnings)
     _, app_id = _require_app_id(args)
+    problems, warnings = nominations.check(doc, force=args.force, app_id=app_id)
+    _report(problems, warnings)
     bearer = _bearer()
     if asc.editable_version(app_id, bearer) is None:
         print("  warning: no App Store version in preparation — make sure the nominated release can ship by its date")
@@ -1633,6 +1634,7 @@ def build_parser():
     nominations_sub = nominations_command.add_subparsers(dest="nominations_command", required=True)
     nominations_check = nominations_sub.add_parser("check", help="validate nominations.json")
     nominations_check.add_argument("--file")
+    nominations_check.add_argument("--app-id")
     nominations_check.add_argument("--force", action="store_true", help="allow < 14 days' notice")
     nominations_check.set_defaults(func=cmd_nominations_check)
     nominations_push = nominations_sub.add_parser("push", help="create/update drafts (dry run unless --apply)")

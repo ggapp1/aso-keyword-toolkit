@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from asokit import cli, nominations
+from asokit import asc, cli, nominations
 from tests.fakes import FakeNominationConnect, install
 
 TODAY = datetime.date(2026, 10, 11)
@@ -40,6 +40,17 @@ class CheckTests(unittest.TestCase):
         problems, _ = nominations.check(doc(publishStartDate="16/11/2026"), today=TODAY)
         self.assertTrue(any("publishStartDate" in p and "YYYY-MM-DD" in p for p in problems))
 
+    def test_dates_must_be_exactly_yyyy_mm_dd(self):
+        for bad in ("20261116", "2026-11-16T09:00:00+05:00"):
+            problems, _ = nominations.check(doc(publishStartDate=bad), today=TODAY)
+            self.assertTrue(any("not a YYYY-MM-DD date" in p for p in problems), (bad, problems))
+
+    def test_related_apps_must_be_a_list_including_the_app(self):
+        self.assertEqual(nominations.check(doc(relatedApps=["1", 2]), today=TODAY, app_id=1)[0], [])
+        for bad, needle in (("1", "non-empty list"), (["2"], "must include this app (1)")):
+            problems, _ = nominations.check(doc(relatedApps=bad), today=TODAY, app_id=1)
+            self.assertTrue(any(needle in p for p in problems), (bad, problems))
+
     def test_dates_become_datetimes(self):
         self.assertEqual(nominations.to_datetime("2026-11-16"), "2026-11-16T00:00:00Z")
         self.assertIsNone(nominations.to_datetime(None))
@@ -58,6 +69,45 @@ class PushTests(unittest.TestCase):
         actions = nominations.push("6757342494", doc(), "t", apply=True, out=lambda line: None)
         self.assertEqual([a["op"] for a in actions], ["unchanged"])
         self.assertEqual(len(self.fake.writes()), before)
+
+    def test_api_normalised_forms_cause_no_patch(self):
+        nominations.push("1", doc(notes="", supplementalMaterialsUris=[]), "t", apply=True, out=lambda line: None)
+        (attrs,) = self.fake.nominations.values()
+        attrs["deviceFamilies"] = ["IPAD", "IPHONE"]
+        attrs["publishStartDate"] = "2026-11-16T00:00:00.000Z"
+        attrs.pop("notes", None)
+        attrs.pop("supplementalMaterialsUris", None)
+        before = len(self.fake.writes())
+        actions = nominations.push("1", doc(notes="", supplementalMaterialsUris=[]), "t", apply=True, out=lambda line: None)
+        self.assertEqual([a["op"] for a in actions], ["unchanged"])
+        self.assertEqual(len(self.fake.writes()), before)
+        attrs["publishStartDate"] = "2026-11-16T00:00:00+00:00"
+        self.assertEqual(nominations.push("1", doc(), "t", apply=True, out=lambda line: None)[0]["op"], "unchanged")
+
+    def test_related_apps_without_this_app_refused_before_writes(self):
+        with self.assertRaises(asc.ASCError):
+            nominations.push("1", doc(relatedApps=["2"]), "t", apply=True, out=lambda line: None)
+        self.assertEqual(self.fake.writes(), [])
+
+    def test_duplicate_live_names_refused_before_writes(self):
+        for nid in ("nomA", "nomB"):
+            self.fake.nominations[nid] = {"name": "MoodSync — new product page", "state": "DRAFT"}
+        with self.assertRaises(asc.ASCError) as caught:
+            nominations.push("1", doc(description="Changed."), "t", apply=True, out=lambda line: None)
+        self.assertIn("MoodSync — new product page", str(caught.exception))
+        self.assertEqual(self.fake.writes(), [])
+
+    def test_submit_happens_after_every_draft_write(self):
+        two = doc()
+        two["nominations"].insert(0, dict(two["nominations"][0], name="Other"))
+        two["nominations"].append(dict(two["nominations"][0], name="Third"))
+        actions = nominations.push("1", two, "t", apply=True, submit_name="Other", out=lambda line: None)
+        self.assertEqual([a["op"] for a in actions], ["create", "create", "create", "submit"])
+        writes = self.fake.writes()
+        self.assertEqual(len(writes), 4)
+        self.assertEqual(writes[-1][0], "PATCH")
+        self.assertIn('"submitted": true', writes[-1][2])
+        self.assertTrue(all(w[0] == "POST" for w in writes[:-1]))
 
     def test_list_carries_state_and_app_filters(self):
         nominations.push("1", doc(), "t", apply=False, out=lambda line: None)
@@ -105,6 +155,15 @@ class NominationCommands(unittest.TestCase):
 
     def test_check_ok(self):
         self.assertIn("ok", self.run_cli("nominations", "check"))
+
+    def test_check_refuses_related_apps_without_config_app(self):
+        path = self.root / "nominations.json"
+        entry = json.loads(path.read_text(encoding="utf-8"))
+        entry["nominations"][0]["relatedApps"] = ["2"]
+        path.write_text(json.dumps(entry), encoding="utf-8")
+        with self.assertRaises(SystemExit):
+            self.run_cli("nominations", "push", "--apply")
+        self.assertEqual(self.fake.log, [])
 
     def test_submit_requires_name_and_apply(self):
         for argv in (["--submit", "--apply"], ["--submit", "--name", "MoodSync — new product page"]):
