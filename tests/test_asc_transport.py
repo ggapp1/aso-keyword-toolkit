@@ -51,5 +51,24 @@ class RateLimitTests(unittest.TestCase):
         sleep.assert_called_once_with(asc.RATE_PAUSE)
 
 
+class RawTransportTests(unittest.TestCase):
+    def test_upload_http_error_becomes_asc_error(self):
+        import io
+        import urllib.error
+        error = urllib.error.HTTPError("https://upload.invalid/x", 403, "Forbidden", {}, io.BytesIO(b"denied"))
+        with mock.patch("asokit.asc.urllib.request.urlopen", side_effect=error):
+            with self.assertRaisesRegex(asc.ASCError, "upload failed.*403.*nothing was placed.*reuses completed uploads"):
+                asc._raw("PUT", "https://upload.invalid/x", {}, b"data")
+
+    def test_network_error_becomes_asc_error(self):
+        import urllib.error
+        with mock.patch("asokit.asc.urllib.request.urlopen", side_effect=urllib.error.URLError("timed out")):
+            with self.assertRaisesRegex(asc.ASCError, "upload failed"):
+                asc._raw("PUT", "https://upload.invalid/x", {}, b"data")
+        with mock.patch("asokit.asc.urllib.request.urlopen", side_effect=TimeoutError("timed out")):
+            with self.assertRaisesRegex(asc.ASCError, "download failed"):
+                asc._raw("GET", "https://cdn.invalid/x", {}, None)
+
+
 if __name__ == "__main__":
     unittest.main()

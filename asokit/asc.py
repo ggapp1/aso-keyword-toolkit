@@ -28,6 +28,7 @@ import os
 import socket
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -1085,12 +1086,25 @@ SCREENSHOT_DONE = frozenset({"COMPLETE", "UPLOAD_COMPLETE"})
 
 
 def _raw(method, url, headers, data):
-    """A non-JSON request (pre-signed upload PUTs, CDN downloads)."""
+    """A non-JSON request (pre-signed upload PUTs, CDN downloads).
+
+    Transport failures become ASCError so callers' abort paths handle them
+    instead of a traceback escaping."""
     request = urllib.request.Request(url, data=data, method=method)
     for name, value in headers.items():
         request.add_header(name, value)
-    with urllib.request.urlopen(request, timeout=120) as response:
-        return response.read()
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            return response.read()
+    except urllib.error.HTTPError as error:
+        reason = f"HTTP {error.code} {error.reason}"
+    except (urllib.error.URLError, OSError) as error:
+        reason = str(getattr(error, "reason", None) or error)
+    host = urllib.parse.urlparse(url).netloc
+    if method == "GET":
+        raise ASCError(f"download failed from {host} ({reason})")
+    raise ASCError(f"upload failed to {host} ({reason}) — nothing was placed for this file; "
+                   "re-running reuses completed uploads")
 
 
 def _localizations(version_id, bearer):
