@@ -17,6 +17,21 @@ DISPLAY_SIZES = {
     "APP_WATCH_SERIES_10": {(416, 496), (410, 502)},
     "APP_WATCH_ULTRA": {(410, 502), (422, 514)},
 }
+
+# Legacy screenshot display types → Asset Library display classes. The only
+# static table in the library path: placement groups themselves are read from
+# Apple's catalog at run time.
+LEGACY_DISPLAY_CLASS = {
+    "APP_IPHONE_67": "IPHONE_DYNAMIC_ISLAND_LARGE_DISPLAY",
+    "APP_IPHONE_61": "IPHONE_DYNAMIC_ISLAND_MEDIUM_DISPLAY",
+    "APP_IPHONE_65": "IPHONE_FACE_ID_LARGE_DISPLAY",
+    "APP_IPAD_PRO_3GEN_129": "IPAD_13_DISPLAY",
+    "APP_IPAD_PRO_129": "IPAD_129_DISPLAY",
+    "APP_WATCH_ULTRA": "WATCH_ULTRA",
+    "APP_WATCH_SERIES_10": "WATCH_SERIES_10",
+}
+LEGACY_BY_CLASS = {value: key for key, value in LEGACY_DISPLAY_CLASS.items()}
+
 MAX_PER_SET = 10
 
 
