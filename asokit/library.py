@@ -310,10 +310,6 @@ def order(group, placement_ids, parent_kind, parent_id, bearer):
     }})
 
 
-def _key(row):
-    return row.get("sha") or row.get("asset")
-
-
 def replace_group(desired, placement_type, group, parent_kind, parent_id, max_count, bearer, apply, current):
     """Make one placement group hold exactly `desired`, in order, with minimal writes.
 
@@ -322,10 +318,15 @@ def replace_group(desired, placement_type, group, parent_kind, parent_id, max_co
     abort never leaves the surface emptier than it started; at the limit the
     extras go first and an abort reports the gap.
     """
+    if max_count is not None and len(desired) > max_count:
+        raise asc.ASCError(f"{parent_id} {group}: {len(desired)} assets exceed the group limit of {max_count}")
     pool = list(current)
     final = []
     for want in desired:
-        match = next((row for row in pool if _key(row) == _key(want)), None)
+        # Exact placement of this asset first; only then any placement of the same bytes.
+        match = next((row for row in pool if row.get("asset") == want.get("asset")), None)
+        if match is None and want.get("sha"):
+            match = next((row for row in pool if row.get("sha") == want["sha"]), None)
         if match:
             pool.remove(match)
         final.append([match["id"] if match else None, want])
@@ -359,7 +360,8 @@ def replace_group(desired, placement_type, group, parent_kind, parent_id, max_co
     ids = [slot[0] for slot in final]
     if len(ids) > 1:
         order(group, ids, parent_kind, parent_id, bearer)
-        actual = [row["id"] for row in surface_placements(parent_kind, parent_id, bearer) if row["group"] == group]
+        actual = [row["id"] for row in surface_placements(parent_kind, parent_id, bearer)
+                  if row["type"] == placement_type and row["group"] == group]
         if actual != ids:
             raise asc.ASCError(f"{parent_id} {group}: order did not stick (got {actual}, wanted {ids})")
     return action
@@ -382,8 +384,11 @@ def sync_groups(requests, catalog, feature, library, bearer, apply, ledger=None,
     for request in requests:
         if "assets" not in request:
             request["assets"] = [uploader.ensure(name, data, request["category"]) for name, data in request["files"]]
-    if apply and uploader.new_ids:
-        states = wait_processed(library, uploader.new_ids, bearer)
+    # Every asset without a specId — fresh uploads and reused UPLOAD_COMPLETE
+    # rows alike — must finish processing and pass the spec check.
+    unprocessed = sorted({a["asset"] for r in requests for a in r["assets"] if not a.get("specId")})
+    if apply and unprocessed:
+        states = wait_processed(library, unprocessed, bearer)
         bad = {i: s for i, s in states.items() if s.get("state") not in PROCESSED}
         if bad:
             details = ", ".join(f"{i}: {s.get('state')} {s.get('stateDetails') or ''}".strip() for i, s in bad.items())
@@ -403,6 +408,12 @@ def sync_groups(requests, catalog, feature, library, bearer, apply, ledger=None,
             for group in groups:
                 plans.append((request, ptype, group))
 
+    for request, ptype, group in plans:
+        limit = catalog.max_count(feature, ptype, group) if group else None
+        if limit is not None and len(request["assets"]) > limit:
+            raise asc.ASCError(f"{request['locale']} {group}: {len(request['assets'])} assets exceed the group limit "
+                               f"of {limit} — nothing placed")
+
     actions, surfaces = [], {}
     for request, ptype, group in plans:
         if group is None:
@@ -418,6 +429,8 @@ def sync_groups(requests, catalog, feature, library, bearer, apply, ledger=None,
                                catalog.max_count(feature, ptype, group), bearer, apply and parent is not None, current)
         action["locale"] = request["locale"]
         actions.append(action)
+        if apply and parent and action["mode"] != "unchanged":
+            surfaces[parent] = surface_placements(request["parent_kind"], parent, bearer)
         if apply and ledger and action["mode"] != "unchanged":
             ledger.record(command, "place", locale=request["locale"], surface=request["parent_kind"], parent_id=parent,
                           placement_type=ptype, group=group, asset_sha=[a["sha"] for a in request["assets"]], mode=action["mode"])
@@ -469,6 +482,7 @@ def active_experiment(app_id, bearer):
         state = attrs.get("state")
         if state in EXPERIMENT_REVIEW:
             return attrs.get("name") or row["id"]
-        if state in EXPERIMENT_LIVE and (attrs.get("startDate") or "") <= now and not attrs.get("endDate"):
+        end = attrs.get("endDate")
+        if state in EXPERIMENT_LIVE and (attrs.get("startDate") or "") <= now and not (end and end <= now):
             return attrs.get("name") or row["id"]
     return None

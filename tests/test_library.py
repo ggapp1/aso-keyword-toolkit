@@ -311,3 +311,92 @@ class ExperimentGuardTests(unittest.TestCase):
         self.assertIsNone(library.active_experiment("1", "t"))
         fake.experiments = [{"id": "e2", "attributes": {"name": "Queued", "state": "WAITING_FOR_REVIEW"}}]
         self.assertEqual(library.active_experiment("1", "t"), "Queued")
+
+
+class ReviewFixRound1Tests(unittest.TestCase):
+    def setUp(self):
+        self.fake = install(self, FakeConnect())
+        self.catalog = library.Catalog.fetch("t")
+
+    def screenshots(self, names, parent="vl-en"):
+        return {"locale": "en-US", "parent_kind": "appStoreVersionLocalization", "parent_id": parent,
+                "placement_types": [library.SCREENSHOT], "category": library.MEDIA,
+                "files": [(n, png_bytes(1290, 2796) + n.encode()) for n in names]}
+
+    def test_reused_unprocessed_row_is_waited_and_checked(self):
+        data = png_bytes(5244, 2950) + b"x"
+        reference, _ = library.reference_name("en-US.png", data)
+        self.fake.images["img0"] = {"fileName": "en-US.png", "fileSize": len(data), "category": library.CREATIVE,
+                                    "referenceName": reference, "state": "UPLOAD_COMPLETE", "specId": None}
+        original = self.fake._list_images
+
+        def lookup(query):   # the reuse lookup sees UPLOAD_COMPLETE; processing then fails
+            rows = original(query)
+            self.fake.images["img0"]["state"] = "FAILED"
+            return rows
+        self.fake._list_images = lookup
+        request = {"locale": "en-US", "parent_kind": "appStoreVersionLocalization", "parent_id": "vl-en",
+                   "placement_types": [library.HEADER], "category": library.CREATIVE, "files": [("en-US.png", data)]}
+        with self.assertRaises(asc.ASCError) as caught:
+            library.sync_groups([request], self.catalog, "APP_STORE_VERSIONS", "lib1", "t", apply=True)
+        self.assertIn("FAILED", str(caught.exception))
+        self.assertFalse(any(e[:2] == ("POST", "/appAssetLibraryImages") for e in self.fake.log))
+        self.assertFalse(any(e[:2] == ("POST", "/appAssetLibraryPlacements") for e in self.fake.log))
+
+    def test_over_limit_errors_before_any_surface_write(self):
+        library.sync_groups([self.screenshots(["old.png"])], self.catalog, "APP_STORE_VERSIONS", "lib1", "t", apply=True)
+        start = len(self.fake.log)
+        names = [f"s{i}.png" for i in range(11)]
+        with self.assertRaises(asc.ASCError) as caught:
+            library.sync_groups([self.screenshots(names)], self.catalog, "APP_STORE_VERSIONS", "lib1", "t", apply=True)
+        self.assertIn("limit of 10", str(caught.exception))
+        tail = self.fake.log[start:]
+        self.assertFalse(any(e[0] == "DELETE" for e in tail))
+        self.assertFalse(any(e[:2] == ("POST", "/appAssetLibraryPlacements") for e in tail))
+        self.assertEqual(self.fake.group("vl-en", "G_IPHONE_L"), ["old.png"])
+        with self.assertRaises(asc.ASCError):
+            library.sync_groups([self.screenshots(names)], self.catalog, "APP_STORE_VERSIONS", "lib1", "t", apply=False)
+
+    def test_replace_group_rejects_over_limit_directly(self):
+        desired = [{"asset": f"a{i}", "sha": f"s{i}"} for i in range(11)]
+        with self.assertRaises(asc.ASCError):
+            library.replace_group(desired, library.SCREENSHOT, "G_IPHONE_L", "appStoreVersionLocalization", "vl-en",
+                                  10, "t", apply=False, current=[])
+        self.assertEqual(self.fake.writes(), [])
+
+    def test_later_plan_on_same_parent_sees_fresh_rows(self):
+        first, second = self.screenshots(["a.png"]), self.screenshots(["b.png"])
+        library.sync_groups([first, second], self.catalog, "APP_STORE_VERSIONS", "lib1", "t", apply=True)
+        self.assertEqual(self.fake.group("vl-en", "G_IPHONE_L"), ["b.png"])
+
+    def test_order_verification_ignores_other_placement_types_in_same_group(self):
+        uploader = library.Uploader("lib1", "t", apply=True)
+        a, b = (uploader.ensure(n, png_bytes(1290, 2796) + n.encode(), library.MEDIA) for n in ("a.png", "b.png"))
+        library.place(a["asset"], library.HEADER, "G_IPHONE_L", "appStoreVersionLocalization", "vl-en", "t")
+        current = [p for p in library.surface_placements("appStoreVersionLocalization", "vl-en", "t")
+                   if p["type"] == library.SCREENSHOT and p["group"] == "G_IPHONE_L"]
+        result = library.replace_group([{"asset": a["asset"], "sha": a["sha"]}, {"asset": b["asset"], "sha": b["sha"]}],
+                                       library.SCREENSHOT, "G_IPHONE_L", "appStoreVersionLocalization", "vl-en",
+                                       10, "t", apply=True, current=current)
+        self.assertEqual(result["mode"], "place-first")
+
+    def test_exact_asset_match_preferred_over_same_bytes(self):
+        data = png_bytes(1290, 2796) + b"same"
+        a = library.Uploader("lib1", "t", apply=True).ensure("a.png", data, library.MEDIA)
+        twin = library.Uploader("lib1", "t", apply=True).ensure("twin.png", data, library.MEDIA)
+        self.assertNotEqual(a["asset"], twin["asset"])
+        self.assertEqual(a["sha"], twin["sha"])
+
+        def current():
+            return [p for p in library.surface_placements("appStoreVersionLocalization", "vl-en", "t") if p["group"] == "G_IPHONE_L"]
+        library.replace_group([{"asset": a["asset"], "sha": a["sha"]}, {"asset": twin["asset"], "sha": twin["sha"]}],
+                              library.SCREENSHOT, "G_IPHONE_L", "appStoreVersionLocalization", "vl-en", 10, "t",
+                              apply=True, current=current())
+        library.replace_group([{"asset": twin["asset"], "sha": twin["sha"]}], library.SCREENSHOT, "G_IPHONE_L",
+                              "appStoreVersionLocalization", "vl-en", 10, "t", apply=True, current=current())
+        self.assertEqual(self.fake.group("vl-en", "G_IPHONE_L"), ["twin.png"])
+
+    def test_experiment_with_future_end_date_still_blocks(self):
+        self.fake.experiments = [{"id": "e1", "attributes": {"name": "Running", "state": "APPROVED",
+                                                             "startDate": "2026-01-01T00:00:00Z", "endDate": "2099-01-01T00:00:00Z"}}]
+        self.assertEqual(library.active_experiment("1", "t"), "Running")
