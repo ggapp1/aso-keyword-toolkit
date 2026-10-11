@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from asokit import cpp, cpp_apply, library
+from asokit import asc, cpp, cpp_apply, library
 from tests.fakes import FakeCppConnect, install
 from tests.test_cpp import make_doc, page
 
@@ -151,6 +151,82 @@ class PushTests(unittest.TestCase):
         result = self.push()
         self.assertTrue(result["problems"])
         self.assertEqual(self.fake.writes(), [])
+
+    def approve_all(self):
+        for version in self.fake.cpp_versions.values():
+            version["state"] = "APPROVED"
+
+    def test_processing_failure_on_page_two_blocks_every_surface_write(self):
+        self.push()
+        self.approve_all()
+        self.doc["pages"][0]["locales"]["en-US"]["keywords"] = ["bpd"]          # page 1: a live in-place edit
+        meds = page(name="Meds", keywords=())
+        meds["locales"]["en-US"]["creative"] = "meds"                            # page 2: new page, new creative
+        self.doc["pages"].append(meds)
+        self.fake.after_commit = "FAILED"
+        start = len(self.fake.writes())
+        with self.assertRaises(asc.ASCError):
+            self.push()
+        surface = [w for w in self.fake.writes()[start:] if not w[1].startswith("/appAssetLibraryImages")]
+        self.assertEqual(surface, [])
+        self.assertEqual(sorted(self.fake.cpp_locs[l]["keywords"] for l in self.fake.cpp_locs)[0], ["borderline", "bpd"])
+
+    def test_created_page_not_readable_raises_without_a_second_create(self):
+        self.fake.hide_created = True
+        with self.assertRaises(asc.ASCError):
+            self.push()
+        creates = [w for w in self.fake.writes() if w[:2] == ("POST", "/appCustomProductPages")]
+        self.assertEqual(len(creates), 1)
+
+    def test_created_version_not_editable_raises_without_a_second_create(self):
+        self.push()
+        self.approve_all()
+        self.doc["pages"][0]["locales"]["en-US"]["screenshots"][0]["order"] = ["02", "06"]
+        self.fake.new_version_state = "WAITING_FOR_REVIEW"
+        with self.assertRaises(asc.ASCError):
+            self.push()
+        creates = [w for w in self.fake.writes() if w[:2] == ("POST", "/appCustomProductPageVersions")]
+        self.assertEqual(len(creates), 1)
+
+    def test_keyword_move_removes_before_adding(self):
+        self.doc["pages"] = [page(name="Beta", keywords=()), page(name="Alpha", keywords=("bpd",))]
+        self.push()
+        self.approve_all()
+        self.doc["pages"][0]["locales"]["en-US"]["keywords"] = ["bpd"]
+        self.doc["pages"][1]["locales"]["en-US"]["keywords"] = []
+        start = len(self.fake.log)
+        result = self.push()
+        self.assertEqual(result["problems"], [])
+        by_page = {self.fake.pages[self.fake.cpp_versions[l["version"]]["page"]]["name"]: l["keywords"] for l in self.fake.cpp_locs.values()}
+        self.assertEqual(by_page, {"Alpha": [], "Beta": ["bpd"]})
+        tail = [(e[0], e[1]) for e in self.fake.log[start:] if e[1].endswith("/relationships/searchKeywords")]
+        self.assertEqual([m for m, _ in tail], ["DELETE", "POST"])
+
+    def test_create_patches_hidden_unless_response_says_hidden(self):
+        self.fake.create_visible = None   # attribute missing/unknown in the response
+        self.push()
+        self.assertEqual(sum(1 for w in self.fake.writes() if w[0] == "PATCH" and w[1].startswith("/appCustomProductPages/")), 1)
+
+    def test_create_skips_patch_when_response_is_hidden(self):
+        self.fake.create_visible = False
+        self.push()
+        self.assertFalse(any(w[0] == "PATCH" and w[1].startswith("/appCustomProductPages/") for w in self.fake.writes()))
+
+    def test_fake_refuses_structural_edits_on_live_versions(self):
+        self.push()
+        page_id = self.fake.page_named("BPD tracker")
+        version_id = next(v for v, row in self.fake.cpp_versions.items() if row["page"] == page_id)
+        with self.assertRaises(asc.ASCError):   # an editable version already exists
+            asc.call("POST", "/appCustomProductPageVersions", "t", {"data": {"type": "appCustomProductPageVersions",
+                     "relationships": {"appCustomProductPage": {"data": {"type": "appCustomProductPages", "id": page_id}}}}})
+        self.approve_all()
+        with self.assertRaises(asc.ASCError):
+            asc.call("POST", "/appCustomProductPageLocalizations", "t", {"data": {"type": "appCustomProductPageLocalizations",
+                     "attributes": {"locale": "fr-FR"},
+                     "relationships": {"appCustomProductPageVersion": {"data": {"type": "appCustomProductPageVersions", "id": version_id}}}}})
+        placement = next(iter(self.fake.placements))
+        with self.assertRaises(asc.ASCError):
+            asc.call("DELETE", f"/appAssetLibraryPlacements/{placement}", "t")
 
     def test_pages_scope(self):
         self.doc["pages"].append(page(name="Report", keywords=()))

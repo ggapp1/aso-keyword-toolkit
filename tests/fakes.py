@@ -265,6 +265,25 @@ class FakeCppConnect(FakeConnect):
         self.cpp_locs = {}      # id -> {"version", "locale", "promotionalText", "keywords": [ids]}
         self.create_visible = True
         self.prepopulate = False
+        self.hide_created = False     # pages made by POST stay invisible to reads (eventual consistency)
+        self.created_pages = set()
+        self.new_version_state = "PREPARE_FOR_SUBMISSION"
+
+    LIVE_STATES = frozenset({"ACCEPTED", "APPROVED"})
+    EDITABLE_STATES = frozenset({"PREPARE_FOR_SUBMISSION", "REJECTED", "READY_FOR_REVIEW"})
+
+    def _live_loc(self, loc_id):
+        loc = self.cpp_locs.get(loc_id)
+        return loc is not None and self.cpp_versions[loc["version"]]["state"] in self.LIVE_STATES
+
+    def _refuse(self, message):
+        raise asc.ASCError(f"App Store Connect returned 409: {message}")
+
+    def _place(self, body):
+        parent = body["data"]["relationships"].get("appCustomProductPageLocalization")
+        if parent and self._live_loc(parent["data"]["id"]):
+            self._refuse("cannot place media on a live custom product page version")
+        return super()._place(body)
 
     def add_page(self, name, state="APPROVED", locales=None, visible=True):
         page_id = self.next_id("page")
@@ -290,8 +309,20 @@ class FakeCppConnect(FakeConnect):
         return next(pid for pid, p in self.pages.items() if p["name"] == name)
 
     def route(self, method, parts, query, body):
+        self._guard(method, parts, body)
         result = super().route(method, parts, query, body)
         return result if result is not None else self.route_cpp(method, parts, query, body)
+
+    def _guard(self, method, parts, body):
+        """Media on a live CPP version cannot change (only promo/keywords are editable in place)."""
+        if method == "DELETE" and parts[:1] == ["appAssetLibraryPlacements"] and len(parts) == 2:
+            placement = self.placements.get(parts[1])
+            if placement and self._live_loc(placement["parent_id"]):
+                self._refuse("cannot remove media from a live custom product page version")
+        if method == "POST" and parts == ["appAssetLibraryPlacementOrderingRequests"]:
+            parent = body["data"]["relationships"].get("appCustomProductPageLocalization")
+            if parent and self._live_loc(parent["data"]["id"]):
+                self._refuse("cannot reorder media on a live custom product page version")
 
     def route_cpp(self, method, parts, query, body):
         if method == "GET" and len(parts) == 3 and parts[0] == "appStoreVersionLocalizations" and parts[2] == "searchKeywords":
@@ -299,9 +330,12 @@ class FakeCppConnect(FakeConnect):
         if method == "GET" and len(parts) == 3 and parts[0] == "appStoreVersionLocalizations" and parts[2] == "appScreenshotSets":
             return {"data": [{"id": f"set-{t}", "attributes": {"screenshotDisplayType": t}} for t in self.legacy_sets.get(parts[1], [])]}
         if method == "GET" and len(parts) == 3 and parts[0] == "apps" and parts[2] == "appCustomProductPages":
-            return {"data": [{"id": pid, "type": "appCustomProductPages",
-                              "attributes": {"name": p["name"], "visible": p["visible"], "url": f"https://apps.apple.com/app/id1?ppid={pid}"}}
-                             for pid, p in self.pages.items()]}
+            return {"data": [self._page_row(pid) for pid in self.pages if not self._hidden(pid)]}
+        if method == "GET" and len(parts) == 2 and parts[0] == "appCustomProductPages":
+            if parts[1] not in self.pages or self._hidden(parts[1]):
+                raise asc.ASCError(f"App Store Connect returned 404 for GET /appCustomProductPages/{parts[1]}")
+            return {"data": self._page_row(parts[1])}
+
         if method == "POST" and parts == ["appCustomProductPages"]:
             return self._create_page(body)
         if method == "PATCH" and parts[:1] == ["appCustomProductPages"]:
@@ -314,7 +348,9 @@ class FakeCppConnect(FakeConnect):
         if method == "POST" and parts == ["appCustomProductPageVersions"]:
             page_id = body["data"]["relationships"]["appCustomProductPage"]["data"]["id"]
             previous = [vid for vid, v in self.cpp_versions.items() if v["page"] == page_id]
-            version_id = self._new_version(page_id, "PREPARE_FOR_SUBMISSION", body["data"].get("attributes", {}).get("deepLink"))
+            if any(self.cpp_versions[vid]["state"] in self.EDITABLE_STATES for vid in previous):
+                self._refuse("the custom product page already has an editable version")
+            version_id = self._new_version(page_id, self.new_version_state, body["data"].get("attributes", {}).get("deepLink"))
             if self.prepopulate and previous:
                 for loc in [l for l in self.cpp_locs.values() if l["version"] == previous[-1]]:
                     self._new_loc(version_id, loc["locale"], loc["promotionalText"], loc["keywords"])
@@ -328,12 +364,16 @@ class FakeCppConnect(FakeConnect):
                              for lid, l in self.cpp_locs.items() if l["version"] == parts[1]]}
         if method == "POST" and parts == ["appCustomProductPageLocalizations"]:
             version_id = body["data"]["relationships"]["appCustomProductPageVersion"]["data"]["id"]
+            if self.cpp_versions[version_id]["state"] in self.LIVE_STATES:
+                self._refuse("cannot add a localization to a live custom product page version")
             attrs = body["data"]["attributes"]
             return {"data": {"id": self._new_loc(version_id, attrs["locale"], attrs.get("promotionalText", ""), [])}}
         if method == "PATCH" and parts[:1] == ["appCustomProductPageLocalizations"]:
             self.cpp_locs[parts[1]]["promotionalText"] = body["data"]["attributes"]["promotionalText"]
             return {"data": {"id": parts[1]}}
         if method == "DELETE" and parts[:1] == ["appCustomProductPageLocalizations"] and len(parts) == 2:
+            if self._live_loc(parts[1]):
+                self._refuse("cannot delete a localization of a live custom product page version")
             self.cpp_locs.pop(parts[1])
             return {}
         if method == "GET" and len(parts) == 3 and parts[0] == "appCustomProductPageLocalizations" and parts[2] == "searchKeywords":
@@ -348,9 +388,18 @@ class FakeCppConnect(FakeConnect):
             return {}
         return None
 
+    def _page_row(self, pid):
+        p = self.pages[pid]
+        return {"id": pid, "type": "appCustomProductPages",
+                "attributes": {"name": p["name"], "visible": p["visible"], "url": f"https://apps.apple.com/app/id1?ppid={pid}"}}
+
+    def _hidden(self, pid):
+        return self.hide_created and pid in self.created_pages
+
     def _create_page(self, body):
         data = body["data"]
         page_id = self.next_id("page")
+        self.created_pages.add(page_id)
         template = data["relationships"].get("appStoreVersionTemplate")
         self.pages[page_id] = {"name": data["attributes"]["name"], "visible": self.create_visible,
                                "template": template and template["data"]["id"]}

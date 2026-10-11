@@ -3,7 +3,8 @@
 
 Reads live state into the snapshot shape `cpp.plan` consumes, runs the
 online half of `cpp.check`, and applies plans: page/version/localization
-writes, keyword links, and media via the Asset Library (`library.sync_groups`).
+writes, keyword links, and media via the Asset Library (`library.prepare` +
+`library.place_prepared`).
 New pages are created hidden; only `publish` changes visibility; only
 `submit` (through `review.submit`) sends anything to App Review.
 """
@@ -151,35 +152,95 @@ def describe(action):
     return f"  {op:<20} {where}{live}"
 
 
-def _refresh(app_id, name, bearer):
-    for row in list_pages(app_id, bearer):
-        if (row.get("attributes") or {}).get("name") == name:
-            return snapshot_page(row, bearer)
-    return None
+CREATES = ("create_page", "create_version")
+
+
+def _reread(name, page_id, bearer, version_id=None):
+    """Snapshot a page we just created (or gave a new version) by id; never by name.
+
+    Raises instead of returning something the planner would answer with a second create.
+    """
+    try:
+        row = asc.call("GET", f"/appCustomProductPages/{page_id}", bearer)["data"]
+    except asc.ASCError as error:
+        raise asc.ASCError(f"{name}: created page {page_id} but could not read it back — re-run `cpp push` "
+                           f"in a minute (it will find the page; nothing is created twice).\n{error}") from error
+    snap = snapshot_page(row, bearer)
+    version = snap.get("version")
+    if version is None or (version_id and version["id"] != version_id):
+        found = version and version["id"]
+        raise asc.ASCError(f"{name}: the new version {version_id or ''} is not the page's latest (found {found}) — "
+                           "re-run `cpp push` in a minute")
+    if version["state"] not in cpp.EDITABLE:
+        raise asc.ASCError(f"{name}: the new version {version['id']} is {version['state']}, not editable — nothing more written")
+    return snap
 
 
 def _keyword_body(ids):
     return {"data": [{"type": "appKeywords", "id": i} for i in ids]}
 
 
-def _execute(app_id, page, snap, actions, doc, ctx, catalog, lib, bearer, creative_root, ledger, out):
-    """Apply one plan. Returns True when a page/version was created and the caller must re-plan."""
+def _remove_keywords(name, action, snap, bearer, ledger):
+    localizations = ((snap or {}).get("version") or {}).get("localizations") or {}
+    ids = [localizations[action["locale"]]["keywords"][k] for k in action["keywords"]]
+    asc.call("DELETE", f"/appCustomProductPageLocalizations/{action['localization']}/relationships/searchKeywords",
+             bearer, _keyword_body(ids))
+    ledger.record("cpp push", "remove_keywords", page_name=name, locale=action["locale"], live=action.get("live") or None,
+                  keywords=action["keywords"])
+
+
+def _media_requests(page, actions, doc, ctx, creative_root, locales):
+    """{locale: [library request]} for every locale of this plan that will need media placed.
+
+    A create (page or version) means every in-scope locale gets filled on the new surface.
+    """
+    if any(a["op"] in CREATES for a in actions):
+        needed = [loc for loc in page["locales"] if not locales or loc in locales]
+    else:
+        needed = [a["locale"] for a in actions if a["op"] == "sync_media"]
+    media = {}
+    for locale in needed:
+        entry = page["locales"][locale]
+        requests = []
+        for shot in entry["screenshots"]:
+            files = cpp.select_screenshots(shot, doc["_root"])
+            requests.append({"locale": locale, "parent_kind": "appCustomProductPageLocalization", "parent_id": None,
+                             "placement_types": [library.SCREENSHOT], "category": library.MEDIA,
+                             "display_class": shots.LEGACY_DISPLAY_CLASS.get(shot["display"]),
+                             "files": [(p.name, p.read_bytes()) for p in files]})
+        if entry.get("creative") and ctx["creative_supported"]:
+            path = cpp.creative_path(doc, creative_root, entry["creative"], locale)
+            requests.append({"locale": locale, "parent_kind": "appCustomProductPageLocalization", "parent_id": None,
+                             "placement_types": [library.HEADER, library.SEARCH], "category": library.CREATIVE,
+                             "files": [(path.name, path.read_bytes())]})
+        if requests:
+            media[locale] = requests
+    return media
+
+
+def _execute(app_id, page, snap, actions, media, ctx, catalog, bearer, ledger, out):
+    """Apply one plan's actions in order (removals already ran in push's first write phase).
+
+    Returns (executed actions, created) where created is None or ("page"|"version", id).
+    Media is placed from assets `library.prepare` already uploaded and checked.
+    """
     name = page["name"]
     localizations = ((snap or {}).get("version") or {}).get("localizations") or {}
     loc_ids = {locale: loc["id"] for locale, loc in localizations.items()}
-    media = []
+    executed, placing = [], []
     for action in actions:
         op = action["op"]
         if op == "skip":
+            executed.append(action)
             continue
         if op == "create_page":
             template = ctx["live_version_id"] if action["template"] else None
             created = asc.call("POST", "/appCustomProductPages", bearer,
                                create_page_body(app_id, name, action["deepLink"], action["locales"], template))["data"]
-            if (created.get("attributes") or {}).get("visible"):
+            if (created.get("attributes") or {}).get("visible") is not False:
                 asc.call("PATCH", f"/appCustomProductPages/{created['id']}", bearer, _visible_body(created["id"], False))
             ledger.record("cpp push", "create_page", page_name=name, page_id=created["id"])
-            return True
+            return executed + [action], ("page", created["id"])
         if op == "create_version":
             attributes = {"deepLink": action["deepLink"]} if action["deepLink"] else {}
             created = asc.call("POST", "/appCustomProductPageVersions", bearer, {"data": {
@@ -187,8 +248,9 @@ def _execute(app_id, page, snap, actions, doc, ctx, catalog, lib, bearer, creati
                 "relationships": {"appCustomProductPage": {"data": {"type": "appCustomProductPages", "id": action["page_id"]}}},
             }})["data"]
             ledger.record("cpp push", "create_version", page_name=name, page_id=action["page_id"], version_id=created["id"])
-            return True
+            return executed + [action], ("version", created["id"])
         locale = action.get("locale")
+        executed.append(action)
         if op == "update_deep_link":
             asc.call("PATCH", f"/appCustomProductPageVersions/{action['version']}", bearer, {"data": {
                 "type": "appCustomProductPageVersions", "id": action["version"], "attributes": {"deepLink": action["deepLink"]}}})
@@ -210,38 +272,33 @@ def _execute(app_id, page, snap, actions, doc, ctx, catalog, lib, bearer, creati
             target = action["localization"] or loc_ids[locale]
             asc.call("POST", f"/appCustomProductPageLocalizations/{target}/relationships/searchKeywords", bearer, _keyword_body(ids))
         elif op == "remove_keywords":
-            ids = [localizations[locale]["keywords"][k] for k in action["keywords"]]
-            asc.call("DELETE", f"/appCustomProductPageLocalizations/{action['localization']}/relationships/searchKeywords",
-                     bearer, _keyword_body(ids))
+            _remove_keywords(name, action, snap, bearer, ledger)
+            continue
         elif op == "sync_media":
-            media.append(action)
+            if locale not in media:
+                raise asc.ASCError(f"{name} {locale}: media was not prepared before writing — nothing placed for it")
+            for request in media[locale]:
+                request["parent_id"] = action["localization"] or loc_ids[locale]
+                placing.append(request)
             continue
         ledger.record("cpp push", op, page_name=name, locale=locale, live=action.get("live") or None,
                       keywords=action.get("keywords"))
-
-    requests = []
-    for action in media:
-        entry = page["locales"][action["locale"]]
-        parent = action["localization"] or loc_ids[action["locale"]]
-        for shot in entry["screenshots"]:
-            files = cpp.select_screenshots(shot, doc["_root"])
-            requests.append({"locale": action["locale"], "parent_kind": "appCustomProductPageLocalization", "parent_id": parent,
-                             "placement_types": [library.SCREENSHOT], "category": library.MEDIA,
-                             "display_class": shots.LEGACY_DISPLAY_CLASS.get(shot["display"]),
-                             "files": [(p.name, p.read_bytes()) for p in files]})
-        if entry.get("creative") and ctx["creative_supported"]:
-            path = cpp.creative_path(doc, creative_root, entry["creative"], action["locale"])
-            requests.append({"locale": action["locale"], "parent_kind": "appCustomProductPageLocalization", "parent_id": parent,
-                             "placement_types": [library.HEADER, library.SEARCH], "category": library.CREATIVE,
-                             "files": [(path.name, path.read_bytes())]})
-    if requests:
-        library.sync_groups(requests, catalog, FEATURE, lib, bearer, True, ledger=ledger, command="cpp push",
-                            progress=lambda a: out(f"    {a.get('locale', ''):<8} {a['type']:<32} {a['mode']}"))
-    return False
+    if placing:
+        library.place_prepared(placing, catalog, FEATURE, bearer, True, ledger=ledger, command="cpp push",
+                               progress=lambda a: out(f"    {a.get('locale', ''):<8} {a['type']:<32} {a['mode']}"))
+    return executed, None
 
 
 def push(app_id, doc, bearer, apply, creative_root="assets-out", pages=None, locales=None, prune=False,
          allow_protected=(), lint=True, ledger=NULL, out=print):
+    """Validate, plan every in-scope page, then (with apply) write in three phases:
+
+    1. prepare — upload/reuse, processing wait and spec/group/limit checks for ALL pages' media;
+       no surface (metadata or placement) write happens before this succeeds;
+    2. keyword removals on every page, so a keyword moving between pages is freed before it is linked;
+    3. per page: metadata, keyword links, placements of the prepared assets. A created page or
+       version is re-read by id and re-planned once; a re-plan never creates again.
+    """
     catalog = library.Catalog.fetch(bearer)
     ctx = online_context(app_id, doc, bearer, catalog)
     problems, warnings = cpp.check(doc, creative_root, allow_protected, lint, online=ctx)
@@ -252,22 +309,47 @@ def push(app_id, doc, bearer, apply, creative_root="assets-out", pages=None, loc
         result["problems"].append(f"not in the file: {', '.join(unknown)}")
     if result["problems"]:
         return result
-    lib = library.library_id(app_id, bearer)
+
+    plans = []
     for page in selected:
         snap = ctx["snapshots"].get(page["name"])
-        for _ in range(3):
-            actions = cpp.plan(page, snap, doc, creative_root, locales, prune, ctx["creative_supported"])
-            for action in actions:
-                out(describe(action))
-            if not apply or not actions or all(a["op"] == "skip" for a in actions):
-                result["actions"] += actions
-                break
-            replan = _execute(app_id, page, snap, actions, doc, ctx, catalog, lib, bearer, creative_root, ledger, out)
-            if not replan:
-                result["actions"] += actions
-                break
-            # Everything up to and including the create ran (live in-place edits precede create_version).
-            cut = next(i for i, a in enumerate(actions) if a["op"] in ("create_page", "create_version"))
-            result["actions"] += actions[:cut + 1]
-            snap = _refresh(app_id, page["name"], bearer)
+        actions = cpp.plan(page, snap, doc, creative_root, locales, prune, ctx["creative_supported"])
+        for action in actions:
+            out(describe(action))
+        plans.append((page, snap, actions, _media_requests(page, actions, doc, ctx, creative_root, locales)))
+    if not apply:
+        result["actions"] = [a for _, _, actions, _ in plans for a in actions]
+        return result
+
+    requests = [r for *_, media in plans for rs in media.values() for r in rs]
+    if requests:
+        library.prepare(requests, catalog, FEATURE, library.library_id(app_id, bearer), bearer, True)
+
+    for page, snap, actions, _ in plans:
+        for action in actions:
+            if action["op"] == "remove_keywords":
+                _remove_keywords(page["name"], action, snap, bearer, ledger)
+
+    for page, snap, actions, media in plans:
+        if not actions or all(a["op"] == "skip" for a in actions):
+            result["actions"] += actions
+            continue
+        removed = [a for a in actions if a["op"] == "remove_keywords"]
+        executed, created = _execute(app_id, page, snap, [a for a in actions if a["op"] != "remove_keywords"],
+                                     media, ctx, catalog, bearer, ledger, out)
+        result["actions"] += removed + executed
+        if created is None:
+            continue
+        kind, created_id = created
+        if kind == "page":
+            snap = _reread(page["name"], created_id, bearer)
+        else:
+            snap = _reread(page["name"], snap["id"], bearer, version_id=created_id)
+        actions = cpp.plan(page, snap, doc, creative_root, locales, prune, ctx["creative_supported"])
+        for action in actions:
+            out(describe(action))
+        if any(a["op"] in CREATES for a in actions):
+            raise asc.ASCError(f"{page['name']}: still needs a new page/version after creating one — stopping")
+        executed, _ = _execute(app_id, page, snap, actions, media, ctx, catalog, bearer, ledger, out)
+        result["actions"] += executed
     return result

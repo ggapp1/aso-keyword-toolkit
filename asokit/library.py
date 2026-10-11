@@ -338,19 +338,23 @@ def replace_group(desired, placement_type, group, parent_kind, parent_id, max_co
         if match:
             pool.remove(match)
         final.append([match["id"] if match else None, want])
-    extras = failed + pool
+    extras = pool
     missing = [slot for slot in final if slot[0] is None]
-    action = {"type": placement_type, "group": group, "parent_id": parent_id, "place": len(missing), "unplace": len(extras)}
-    if not missing and not extras:
+    action = {"type": placement_type, "group": group, "parent_id": parent_id, "place": len(missing),
+              "unplace": len(failed) + len(extras)}
+    if not missing and not extras and not failed:
         action["mode"] = "unchanged" if [s[0] for s in final] == [row["id"] for row in current] else "reorder"
     else:
-        place_first = max_count is None or len(current) + len(missing) <= max_count
+        # FAILED rows show nothing, so they are always removed first and never count toward capacity.
+        place_first = max_count is None or len(current) - len(failed) + len(missing) <= max_count
         action["mode"] = "place-first" if place_first else "unplace-first"
     if not apply or action["mode"] == "unchanged":
         return action
 
     placed = 0
     try:
+        for row in failed:
+            unplace(row["id"], bearer)
         if action["mode"] == "unplace-first":
             for row in extras:
                 unplace(row["id"], bearer)
@@ -375,18 +379,13 @@ def replace_group(desired, placement_type, group, parent_kind, parent_id, max_co
     return action
 
 
-def sync_groups(requests, catalog, feature, library, bearer, apply, ledger=None, command="", progress=None):
-    """Upload/reuse every file, wait once, then replace each request's groups.
+def prepare(requests, catalog, feature, library, bearer, apply):
+    """Phase 1 — no surface writes: upload/reuse every file, wait once for processing,
+    resolve each request's placement groups and check group limits.
 
-    A request is a dict:
-      locale, parent_kind, parent_id (None for a surface that doesn't exist yet — dry run only),
-      placement_types: [type, ...]  (one asset sequence is placed under each type),
-      category: CREATIVE or MEDIA,
-      files: [(file_name, bytes), ...]  OR  assets: [{"asset", "sha", "specId"}] (re-place existing assets),
-      display_class: optional tie-breaker when a spec maps to several groups (e.g. Watch 410×502),
-      groups: optional explicit group list (mirroring copies the source group).
-    Phase 1 (no surface writes): uploads + one processing wait + spec checks.
-    Phase 2: replace_group per (request, type, group).
+    Fills request["assets"] (with specId) and request["targets"] = [(placement_type, group | None)],
+    where None means the catalog has no such placement type for `feature`. Requests may have no
+    parent yet (the surface is created later); `place_prepared` places them once it exists.
     """
     uploader = Uploader(library, bearer, apply)
     for request in requests:
@@ -406,45 +405,69 @@ def sync_groups(requests, catalog, feature, library, bearer, apply, ledger=None,
                 if asset["asset"] in states:
                     asset["specId"] = states[asset["asset"]]["specId"]
 
-    plans = []
     for request in requests:
+        targets = []
         for ptype in request["placement_types"]:
             if not catalog.supports(feature, ptype):
-                plans.append((request, ptype, None))
+                targets.append((ptype, None))
                 continue
             groups = request.get("groups") or _resolve_groups(catalog, feature, ptype, request)
-            for group in groups:
-                plans.append((request, ptype, group))
+            targets += [(ptype, group) for group in groups]
+        request["targets"] = targets
 
-    for request, ptype, group in plans:
-        limit = catalog.max_count(feature, ptype, group) if group else None
-        if limit is not None and len(request["assets"]) > limit:
-            raise asc.ASCError(f"{request['locale']} {group}: {len(request['assets'])} assets exceed the group limit "
-                               f"of {limit} — nothing placed")
+    for request in requests:
+        for ptype, group in request["targets"]:
+            limit = catalog.max_count(feature, ptype, group) if group else None
+            if limit is not None and len(request["assets"]) > limit:
+                raise asc.ASCError(f"{request['locale']} {group}: {len(request['assets'])} assets exceed the group limit "
+                                   f"of {limit} — nothing placed")
+    return requests
 
+
+def place_prepared(requests, catalog, feature, bearer, apply, ledger=None, command="", progress=None):
+    """Phase 2: replace_group per (request, type, group) for requests `prepare` filled."""
     actions, surfaces = [], {}
-    for request, ptype, group in plans:
-        if group is None:
-            actions.append({"locale": request["locale"], "type": ptype, "group": None, "mode": "unsupported",
-                            "parent_id": request["parent_id"], "place": 0, "unplace": 0})
-            continue
-        parent = request["parent_id"]
-        if parent not in surfaces:
-            surfaces[parent] = surface_placements(request["parent_kind"], parent, bearer) if parent else []
-        current = [row for row in surfaces[parent] if row["type"] == ptype and row["group"] == group]
-        desired = [{"asset": a["asset"], "sha": a["sha"]} for a in request["assets"]]
-        action = replace_group(desired, ptype, group, request["parent_kind"], parent,
-                               catalog.max_count(feature, ptype, group), bearer, apply and parent is not None, current)
-        action["locale"] = request["locale"]
-        actions.append(action)
-        if apply and parent and action["mode"] != "unchanged":
-            surfaces[parent] = surface_placements(request["parent_kind"], parent, bearer)
-        if apply and ledger and action["mode"] != "unchanged":
-            ledger.record(command, "place", locale=request["locale"], surface=request["parent_kind"], parent_id=parent,
-                          placement_type=ptype, group=group, asset_sha=[a["sha"] for a in request["assets"]], mode=action["mode"])
-        if progress:
-            progress(action)
+    for request in requests:
+        for ptype, group in request["targets"]:
+            if group is None:
+                action = {"locale": request["locale"], "type": ptype, "group": None, "mode": "unsupported",
+                          "parent_id": request["parent_id"], "place": 0, "unplace": 0}
+                actions.append(action)
+                continue
+            parent = request["parent_id"]
+            if parent not in surfaces:
+                surfaces[parent] = surface_placements(request["parent_kind"], parent, bearer) if parent else []
+            current = [row for row in surfaces[parent] if row["type"] == ptype and row["group"] == group]
+            desired = [{"asset": a["asset"], "sha": a["sha"]} for a in request["assets"]]
+            action = replace_group(desired, ptype, group, request["parent_kind"], parent,
+                                   catalog.max_count(feature, ptype, group), bearer, apply and parent is not None, current)
+            action["locale"] = request["locale"]
+            actions.append(action)
+            if apply and parent and action["mode"] != "unchanged":
+                surfaces[parent] = surface_placements(request["parent_kind"], parent, bearer)
+            if apply and ledger and action["mode"] != "unchanged":
+                ledger.record(command, "place", locale=request["locale"], surface=request["parent_kind"], parent_id=parent,
+                              placement_type=ptype, group=group, asset_sha=[a["sha"] for a in request["assets"]], mode=action["mode"])
+            if progress:
+                progress(action)
     return actions
+
+
+def sync_groups(requests, catalog, feature, library, bearer, apply, ledger=None, command="", progress=None):
+    """Upload/reuse every file, wait once, then replace each request's groups.
+
+    A request is a dict:
+      locale, parent_kind, parent_id (None for a surface that doesn't exist yet — dry run only),
+      placement_types: [type, ...]  (one asset sequence is placed under each type),
+      category: CREATIVE or MEDIA,
+      files: [(file_name, bytes), ...]  OR  assets: [{"asset", "sha", "specId"}] (re-place existing assets),
+      display_class: optional tie-breaker when a spec maps to several groups (e.g. Watch 410×502),
+      groups: optional explicit group list (mirroring copies the source group).
+    Phase 1 (`prepare`, no surface writes): uploads + one processing wait + spec/group/limit checks.
+    Phase 2 (`place_prepared`): replace_group per (request, type, group).
+    """
+    prepare(requests, catalog, feature, library, bearer, apply)
+    return place_prepared(requests, catalog, feature, bearer, apply, ledger=ledger, command=command, progress=progress)
 
 
 def _resolve_groups(catalog, feature, ptype, request):

@@ -252,6 +252,18 @@ class ReplaceGroupTests(unittest.TestCase):
         self.assertTrue(all(p["state"] != "FAILED" for p in self.current()))
         self.assertEqual(self.replace(["a.png", "b.png"])["mode"], "unchanged")
 
+    def test_failed_rows_are_unplaced_before_anything_is_placed(self):
+        self.replace(["a.png", "b.png"])
+        failed_id = next(pid for pid, p in self.fake.placements.items() if self.fake.images[p["image"]]["fileName"] == "a.png")
+        self.fake.placements[failed_id]["state"] = "FAILED"
+        self.asset("a.png")
+        start = len(self.fake.log)
+        result = self.replace(["a.png", "b.png"])
+        self.assertEqual(result["mode"], "place-first")   # under capacity, yet the FAILED row still goes first
+        tail = [entry[:2] for entry in self.fake.log[start:] if entry[0] != "GET"]
+        self.assertEqual(tail.index(("DELETE", f"/appAssetLibraryPlacements/{failed_id}")), 0)
+        self.assertLess(0, tail.index(("POST", "/appAssetLibraryPlacements")))
+
     def test_never_deletes_assets(self):
         self.replace(["a.png", "b.png"])
         self.replace(["c.png"])
@@ -267,6 +279,25 @@ class SyncGroupsTests(unittest.TestCase):
         return {"locale": locale, "parent_kind": "appStoreVersionLocalization", "parent_id": parent,
                 "placement_types": [library.HEADER, library.SEARCH], "category": library.CREATIVE,
                 "files": [(f"{locale}.png", png_bytes(5244, 2950) + locale.encode())]}
+
+    def test_prepare_uploads_and_checks_without_surface_writes_then_places_without_reupload(self):
+        request = self.creative_request("en-US", None)
+        library.prepare([request], self.catalog, "APP_STORE_VERSIONS", "lib1", "t", apply=True)
+        self.assertFalse(any("/appAssetLibraryPlacement" in e[1] for e in self.fake.writes()))
+        self.assertEqual(request["targets"], [(library.HEADER, "G_HEADER"), (library.SEARCH, "G_SEARCH")])
+        self.assertTrue(all(a["specId"] for a in request["assets"]))
+        uploads = sum(1 for e in self.fake.writes() if e[:2] == ("POST", "/appAssetLibraryImages"))
+        request["parent_id"] = "vl-en"
+        library.place_prepared([request], self.catalog, "APP_STORE_VERSIONS", "t", apply=True)
+        self.assertEqual(self.fake.group("vl-en", "G_HEADER"), ["en-US.png"])
+        self.assertEqual(sum(1 for e in self.fake.writes() if e[:2] == ("POST", "/appAssetLibraryImages")), uploads)
+
+    def test_prepare_rejects_over_limit_before_any_surface_exists(self):
+        request = {"locale": "en-US", "parent_kind": "appStoreVersionLocalization", "parent_id": None,
+                   "placement_types": [library.SCREENSHOT], "category": library.MEDIA,
+                   "files": [(f"{n}.png", png_bytes(1290, 2796) + bytes([n])) for n in range(11)]}
+        with self.assertRaises(asc.ASCError):
+            library.prepare([request], self.catalog, "APP_STORE_VERSIONS", "lib1", "t", apply=False)
 
     def test_creative_lands_in_header_and_search(self):
         actions = library.sync_groups([self.creative_request("en-US", "vl-en"), self.creative_request("de-DE", "vl-de")],
