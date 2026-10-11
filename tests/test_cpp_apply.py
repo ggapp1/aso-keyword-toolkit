@@ -428,6 +428,37 @@ class PublishSubmitTests(unittest.TestCase):
             cpp_apply.submit("1", self.doc, ["BPD tracker"], "t", apply=True, out=lambda line: None)
         self.assertEqual(self.fake.submissions, {})
 
+    def new_version_from(self, doc):
+        self.set_state("APPROVED")
+        doc["pages"][0]["locales"]["en-US"]["screenshots"][0]["order"] = ["02", "06"]   # forces a new version
+        result = cpp_apply.push("1", doc, "t", True, out=lambda line: None)
+        self.assertEqual(result["problems"], [])
+        self.assertIn("create_version", [a["op"] for a in result["actions"]])
+
+    def test_submit_refuses_new_version_dropping_a_live_locale(self):
+        both = self.other_doc([page(extra_locales={"en-GB": {"same": "en-US", "keywords": ["bpd"]}})])
+        self.fake.pages.clear()
+        cpp_apply.push("1", both, "t", True, out=lambda line: None)
+        only_us = self.other_doc([page()])
+        self.new_version_from(only_us)
+        with self.assertRaisesRegex(review.SubmissionBlocked, "would drop.*en-GB"):
+            cpp_apply.submit("1", only_us, ["BPD tracker"], "t", apply=True, out=lambda line: None)
+        self.assertEqual(self.fake.submissions, {})
+
+    def test_submit_refuses_new_version_dropping_live_creative(self):
+        bare = page()
+        del bare["locales"]["en-US"]["creative"]
+        doc = self.other_doc([bare])
+        self.new_version_from(doc)
+        with self.assertRaisesRegex(review.SubmissionBlocked, "would drop.*en-US header.*en-US search"):
+            cpp_apply.submit("1", doc, ["BPD tracker"], "t", apply=True, out=lambda line: None)
+        self.assertEqual(self.fake.submissions, {})
+
+    def test_submit_allows_new_version_keeping_everything_live(self):
+        self.new_version_from(self.doc)
+        result = cpp_apply.submit("1", self.doc, ["BPD tracker"], "t", apply=False, out=lambda line: None)
+        self.assertEqual([i[0] for i in result["add"]], ["appCustomProductPageVersion"])
+
     def test_submit_dry_run_happy_path(self):
         result = cpp_apply.submit("1", self.doc, ["BPD tracker"], "t", apply=False, out=lambda line: None)
         self.assertEqual([i[0] for i in result["add"]], ["appCustomProductPageVersion"])

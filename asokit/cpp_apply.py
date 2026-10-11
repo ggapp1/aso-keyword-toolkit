@@ -493,6 +493,42 @@ def _check_declared(name, file_page, localizations, catalog, creative_supported)
                                                    "placement is on the version — run cpp push")
 
 
+def _surface_summary(localizations, catalog):
+    """{locale: {"screenshots <display class>" | "header" | "search"}} of one version."""
+    summary = {}
+    for locale, loc in localizations.items():
+        kinds = set()
+        for placement in loc["placements"]:
+            if placement["type"] == library.SCREENSHOT:
+                kinds.add(f"{catalog.display_class(placement['group'])} screenshots")
+            elif placement["type"] == library.HEADER:
+                kinds.add("header")
+            elif placement["type"] == library.SEARCH:
+                kinds.add("search")
+        summary[locale] = kinds
+    return summary
+
+
+def _check_keeps_live(name, snap, catalog, bearer):
+    """A new version replaces the live one whole when approved: refuse one that
+    would silently drop a locale or a placement kind the live version has."""
+    live_id = snap.get("live_version_id")
+    if not live_id:
+        return
+    live = _surface_summary(read_localizations(live_id, bearer), catalog)
+    new = _surface_summary(snap["version"]["localizations"], catalog)
+    lost = []
+    for locale in sorted(live):
+        if locale not in new:
+            lost.append(f"{locale} (whole locale)")
+            continue
+        lost += [f"{locale} {kind}" for kind in sorted(live[locale] - new[locale])]
+    if lost:
+        raise review.SubmissionBlocked(
+            f"'{name}': the new version would drop what is live now: {'; '.join(lost)} — "
+            "declare them in cpp.json and run cpp push, so approval doesn't remove them")
+
+
 def submit(app_id, doc, names, bearer, apply, ledger=NULL, out=print):
     """Send the named pages' latest versions to App Review via review.submit."""
     # Cheap read-only guard first: an in-flight submission or a foreign draft
@@ -518,6 +554,7 @@ def submit(app_id, doc, names, bearer, apply, ledger=NULL, out=print):
             if states & BAD_PLACEMENT:
                 raise review.SubmissionBlocked(f"'{name}' {locale}: placements still {sorted(states & BAD_PLACEMENT)} — wait or re-push")
         _check_declared(name, pages.get(name), version["localizations"], catalog, supported)
+        _check_keeps_live(name, snap, catalog, bearer)
         items.append(("appCustomProductPageVersion", "appCustomProductPageVersions", version["id"]))
         out(f"  {name}: version {version['id']} ({version['state']})")
     return review.submit(app_id, items, bearer, apply, ledger=ledger, command="cpp submit")

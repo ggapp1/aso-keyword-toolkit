@@ -732,8 +732,10 @@ localization.
 `cpp submit` and `cpp publish` require `--pages` and validate every named
 page before doing anything. `submit` refuses if a locale or device family
 declared in the file isn't actually placed on the page (a declared creative
-needs both its header and search placement), refuses a page that is visible
-but has never been approved (hide it with `cpp publish --pages NAME --hide
+needs both its header and search placement), refuses a new version of a live page that would drop
+a locale, a screenshot display class, or a header/search placement the live
+version has (approval replaces the live version whole), refuses a page that is
+visible but has never been approved (hide it with `cpp publish --pages NAME --hide
 --apply`), and won't add pages to
 a draft submission that already holds something else, such as your app
 version. `publish` refuses pages that aren't approved.
