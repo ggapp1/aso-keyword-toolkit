@@ -44,7 +44,10 @@ def norm(keyword):
     return " ".join(keyword.split()).casefold()
 
 
-def expand(doc):
+def expand(doc, problems=None):
+    """Resolve `same` and normalise entries. A `keywords` value that is not a
+    list of strings raises CppError, or, when `problems` is a list (as `check`
+    passes), is reported there and treated as empty."""
     pages = []
     for raw_page in doc.get("pages", []):
         raw = raw_page.get("locales", {})
@@ -58,7 +61,14 @@ def expand(doc):
                 resolved.update({key: value for key, value in entry.items() if key in COPIED})
             else:
                 resolved = {key: entry.get(key) for key in COPIED}
-            resolved["keywords"] = [k.strip() for k in entry.get("keywords", []) if k.strip()]
+            raw_keywords = entry.get("keywords", [])
+            if not isinstance(raw_keywords, list) or not all(isinstance(k, str) for k in raw_keywords):
+                message = f"{raw_page.get('name')} {locale}: 'keywords' must be a list of strings"
+                if problems is None:
+                    raise CppError(message)
+                problems.append(message)
+                raw_keywords = []
+            resolved["keywords"] = [k.strip() for k in raw_keywords if k.strip()]
             resolved["screenshots"] = resolved.get("screenshots") or []
             locales[locale] = resolved
         pages.append({"name": raw_page.get("name", ""), "deepLink": raw_page.get("deepLink"),
@@ -94,9 +104,9 @@ def _protected(doc, locale):
 def check(doc, creative_root="assets-out", allow_protected=(), lint=True, online=None):
     problems, warnings = [], []
     try:
-        pages = expand(doc)
+        pages = expand(doc, problems)
     except CppError as error:
-        return [str(error)], []
+        return problems + [str(error)], []
     names = [p["name"] for p in pages]
     for name in sorted({n for n in names if names.count(n) > 1}):
         problems.append(f"page name '{name}' appears more than once")
@@ -193,6 +203,8 @@ def media_differs(media, placements, creative_supported):
     screenshots, creative_sha = media
     groups = {}
     for row in placements:
+        if row.get("state") == "FAILED":
+            continue  # a failed placement never counts as in sync (submit refuses it)
         groups.setdefault((row["type"], row["group"]), []).append(row.get("sha") or row.get("asset"))
     current_shots = [seq for (ptype, _), seq in groups.items() if ptype == SCREENSHOT]
     if any(seq not in current_shots for seq in screenshots):
@@ -222,6 +234,8 @@ def plan(page, snap, doc, creative_root="assets-out", locales=None, prune=False,
     wanted = {loc: entry for loc, entry in page["locales"].items() if not locales or loc in locales}
     if snap is None or snap.get("version") is None:
         if snap is None:
+            if not wanted:
+                return [{"op": "skip", "page": name, "reason": "no locales in scope", "live": False}]
             actions = [{"op": "create_page", "page": name, "deepLink": page["deepLink"], "live": False,
                         "template": page["template"] == "appStoreVersion",
                         "locales": {loc: entry.get("promotionalText") for loc, entry in sorted(wanted.items())}}]
@@ -236,10 +250,15 @@ def plan(page, snap, doc, creative_root="assets-out", locales=None, prune=False,
     state = version["state"]
     if state in LOCKED:
         return [{"op": "skip", "page": name, "reason": f"version {state} — in review; re-run after review", "live": False}]
+    if state not in EDITABLE and state not in LIVE:
+        return [{"op": "skip", "page": name, "reason": f"version {state} — not editable", "live": False}]
     current = version["localizations"]
     media = {loc: desired_media(doc, entry, loc, creative_root) for loc, entry in wanted.items()}
     deep_link_changed = (page["deepLink"] or None) != (version.get("deepLink") or None)
     extras = [loc for loc in current if loc not in page["locales"]] if (prune and not locales) else []
+    added = [loc for loc in wanted if loc not in current]
+    if extras and len(current) - len(extras) + len(added) < 1:
+        extras = []  # never delete the last localization, so never version for it either
 
     if state in LIVE:
         actions = []
@@ -251,8 +270,7 @@ def plan(page, snap, doc, creative_root="assets-out", locales=None, prune=False,
                 actions.append({"op": "update_promo", "page": name, "locale": loc, "localization": here["id"],
                                 "promotionalText": entry.get("promotionalText") or "", "live": True})
             actions += _keyword_actions(name, loc, here["id"], entry["keywords"], here["keywords"], live=True)
-        needs_version = (deep_link_changed or extras
-                         or any(loc not in current for loc in wanted)
+        needs_version = (deep_link_changed or extras or added
                          or any(media_differs(media[loc], current[loc]["placements"], creative_supported) for loc in wanted if loc in current))
         if needs_version:
             actions.append({"op": "create_version", "page": name, "page_id": snap["id"], "deepLink": page["deepLink"], "live": False})

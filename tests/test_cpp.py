@@ -141,6 +141,22 @@ class CheckTests(unittest.TestCase):
             problems, _ = self.check(tmp, [bad])
         self.assertTrue(any("nope" in p for p in problems))
 
+    def test_page_cap_counts_live_pages(self):
+        live = {f"Live {n}" for n in range(70)}
+        with tempfile.TemporaryDirectory() as tmp:
+            problems, _ = self.check(tmp, [page()], online=online(live_pages=live))
+        self.assertTrue(any("71" in p and "70" in p for p in problems))
+
+    def test_keywords_must_be_a_list(self):
+        bad = page()
+        bad["locales"]["en-US"]["keywords"] = "bpd"
+        with tempfile.TemporaryDirectory() as tmp:
+            problems, _ = self.check(tmp, [bad])
+        self.assertTrue(any("'keywords' must be a list" in p for p in problems))
+        self.assertFalse(any("'b'" in p for p in problems))
+        with self.assertRaises(cpp.CppError):
+            cpp.expand({"pages": [bad]})
+
     def test_deep_link_warns_about_review(self):
         with tempfile.TemporaryDirectory() as tmp:
             _, warnings = self.check(tmp, [page(deepLink="moodsync://log")])
@@ -253,6 +269,48 @@ class PlanTests(unittest.TestCase):
         self.assertEqual({r["locale"] for r in rows}, {"en-US", "en-GB"})
         self.assertEqual(rows[0]["page_id"], "page1")
         self.assertEqual(rows[0]["keywords"], "bpd;borderline")
+
+
+    def test_replaced_state_is_skipped_not_edited(self):
+        snap = live_snap(self.doc, state="REPLACED_WITH_NEW_VERSION", locales=("en-US", "en-GB"))
+        actions = cpp.plan(self.page, snap, self.doc)
+        self.assertEqual(self.ops(actions), ["skip"])
+        self.assertIn("not editable", actions[0]["reason"])
+
+    def test_page_without_versions_creates_a_version(self):
+        snap = live_snap(self.doc)
+        snap["version"] = None
+        actions = cpp.plan(self.page, snap, self.doc)
+        self.assertEqual(self.ops(actions), ["create_version"])
+        self.assertEqual(actions[0]["page_id"], "page1")
+
+    def fail_one_screenshot(self, snap, locale="en-US"):
+        placement = snap["version"]["localizations"][locale]["placements"][0]
+        self.assertEqual(placement["type"], "APP_SCREENSHOT")
+        placement["state"] = "FAILED"
+
+    def test_failed_placement_resyncs_editable(self):
+        snap = live_snap(self.doc, state="PREPARE_FOR_SUBMISSION", locales=("en-US", "en-GB"))
+        self.assertEqual(cpp.plan(self.page, snap, self.doc), [])
+        self.fail_one_screenshot(snap)
+        actions = cpp.plan(self.page, snap, self.doc)
+        self.assertEqual([(a["op"], a["locale"]) for a in actions], [("sync_media", "en-US")])
+
+    def test_failed_placement_on_live_needs_a_new_version(self):
+        snap = live_snap(self.doc, locales=("en-US", "en-GB"))
+        self.fail_one_screenshot(snap)
+        self.assertEqual(self.ops(cpp.plan(self.page, snap, self.doc)), ["create_version"])
+
+    def test_live_prune_blocked_by_last_localization_does_not_version(self):
+        lone = cpp.expand(make_doc(tempfile.mkdtemp(), [page()]))[0]
+        lone["locales"] = {}
+        snap = live_snap(self.doc, locales=("en-AU",))
+        self.assertEqual(cpp.plan(lone, snap, self.doc, prune=True), [])
+
+    def test_missing_page_with_no_locales_in_scope_is_skipped(self):
+        actions = cpp.plan(self.page, None, self.doc, locales=["fr-FR"])
+        self.assertEqual(self.ops(actions), ["skip"])
+        self.assertIn("no locales in scope", actions[0]["reason"])
 
 
 if __name__ == "__main__":
