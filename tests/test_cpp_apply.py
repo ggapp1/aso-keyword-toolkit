@@ -236,3 +236,63 @@ class PushTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from asokit import review
+
+
+class PublishSubmitTests(unittest.TestCase):
+    def setUp(self):
+        self.fake = install(self, FakeCppConnect())
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.doc = make_doc(self.tmp.name, [page()])
+        cpp_apply.push("1", self.doc, "t", True, out=lambda line: None)
+        self.page_id = self.fake.page_named("BPD tracker")
+
+    def set_state(self, state):
+        for version in self.fake.cpp_versions.values():
+            version["state"] = state
+
+    def test_publish_refuses_unapproved(self):
+        with self.assertRaises(cpp_apply.PublishError):
+            cpp_apply.publish("1", ["BPD tracker"], "t", apply=True, out=lambda line: None)
+        self.assertFalse(self.fake.pages[self.page_id]["visible"])
+
+    def test_publish_and_hide(self):
+        self.set_state("APPROVED")
+        changes = cpp_apply.publish("1", ["BPD tracker"], "t", apply=True, out=lambda line: None)
+        self.assertTrue(self.fake.pages[self.page_id]["visible"])
+        self.assertEqual(changes[0]["keywords"]["en-US"], ["borderline", "bpd"])
+        cpp_apply.publish("1", ["BPD tracker"], "t", apply=True, hide=True, out=lambda line: None)
+        self.assertFalse(self.fake.pages[self.page_id]["visible"])
+
+    def test_publish_dry_run_changes_nothing(self):
+        self.set_state("APPROVED")
+        cpp_apply.publish("1", ["BPD tracker"], "t", apply=False, out=lambda line: None)
+        self.assertFalse(self.fake.pages[self.page_id]["visible"])
+
+    def test_submit_adds_only_the_named_page_version(self):
+        result = cpp_apply.submit("1", self.doc, ["BPD tracker"], "t", apply=True, out=lambda line: None)
+        items = self.fake.submissions[result["submission"]]["items"]
+        self.assertEqual([i[0] for i in items], ["appCustomProductPageVersion"])
+
+    def test_submit_refuses_failed_placement(self):
+        for placement in self.fake.placements.values():
+            placement["state_override"] = "FAILED"
+        original = self.fake._surface
+
+        def failing(kind, parent):
+            result = original(kind, parent)
+            for row in result["data"]:
+                row["attributes"]["state"] = "FAILED"
+            return result
+        self.fake._surface = failing
+        with self.assertRaises(review.SubmissionBlocked):
+            cpp_apply.submit("1", self.doc, ["BPD tracker"], "t", apply=True, out=lambda line: None)
+        self.assertEqual(self.fake.submissions, {})
+
+    def test_submit_refuses_in_review_page(self):
+        self.set_state("IN_REVIEW")
+        with self.assertRaises(review.SubmissionBlocked):
+            cpp_apply.submit("1", self.doc, ["BPD tracker"], "t", apply=True, out=lambda line: None)

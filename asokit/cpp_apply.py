@@ -353,3 +353,81 @@ def push(app_id, doc, bearer, apply, creative_root="assets-out", pages=None, loc
         executed, _ = _execute(app_id, page, snap, actions, media, ctx, catalog, bearer, ledger, out)
         result["actions"] += executed
     return result
+
+
+class PublishError(asc.ASCError):
+    pass
+
+
+def _page_row(app_id, name, bearer, rows=None):
+    for row in rows if rows is not None else list_pages(app_id, bearer):
+        if (row.get("attributes") or {}).get("name") == name:
+            return row
+    raise PublishError(f"no custom product page named '{name}' in App Store Connect")
+
+
+def publish(app_id, names, bearer, apply, hide=False, ledger=NULL, out=print):
+    """Make pages visible (organic routing goes live) or hide them.
+
+    Every named page is resolved and checked before the first write, so one
+    unapproved page in the list leaves all of them untouched.
+    """
+    rows = list_pages(app_id, bearer)
+    target = not hide
+    planned = []
+    for name in dict.fromkeys(names):
+        row = _page_row(app_id, name, bearer, rows)
+        snap = snapshot_page(row, bearer, with_media=False)
+        state = (snap["version"] or {}).get("state")
+        if not hide and state not in cpp.LIVE:
+            raise PublishError(f"'{name}' latest version is {state} — publish only after Apple approves it (`asokit cpp submit` first)")
+        keywords = {locale: sorted(loc["keywords"]) for locale, loc in ((snap["version"] or {}).get("localizations") or {}).items()}
+        planned.append((row, {"page": name, "from": bool(snap["visible"]), "to": target, "keywords": keywords}))
+    verb = "hide" if hide else "publish"
+    for row, change in planned:
+        name, keywords = change["page"], change["keywords"]
+        if change["from"] == target:
+            out(f"  {name}: already {'visible' if target else 'hidden'}")
+            continue
+        effect = "stops routing" if hide else "starts routing"
+        for locale, kws in sorted(keywords.items()):
+            out(f"  {name} {locale}: {effect} organic search for {', '.join(kws) or '(no keywords)'}")
+        if apply:
+            asc.call("PATCH", f"/appCustomProductPages/{row['id']}", bearer, _visible_body(row["id"], target))
+            ledger.record("cpp publish", verb, page_name=name, page_id=row["id"], keywords=keywords)
+    return [change for _, change in planned]
+
+
+SUBMITTABLE = cpp.EDITABLE
+BAD_PLACEMENT = frozenset({"ASSET_PROCESSING", "FAILED"})
+
+
+def submit(app_id, doc, names, bearer, apply, ledger=NULL, out=print):
+    """Send the named pages' latest versions to App Review via review.submit."""
+    # Cheap read-only guard first: an in-flight submission or a foreign draft
+    # item stops us before any snapshot work.
+    review.preflight(app_id, bearer, {"appCustomProductPageVersion"})
+    catalog = library.Catalog.fetch(bearer)
+    supported = catalog.supports(FEATURE, library.HEADER)
+    pages = {p["name"]: p for p in cpp.expand(doc)}
+    rows = list_pages(app_id, bearer)
+    items = []
+    for name in dict.fromkeys(names):
+        row = _page_row(app_id, name, bearer, rows)
+        snap = snapshot_page(row, bearer)
+        version = snap["version"]
+        if version is None or version["state"] not in SUBMITTABLE:
+            raise review.SubmissionBlocked(f"'{name}' has nothing to submit (latest version {version and version['state']})")
+        for locale, loc in version["localizations"].items():
+            states = {p["state"] for p in loc["placements"]}
+            if states & BAD_PLACEMENT:
+                raise review.SubmissionBlocked(f"'{name}' {locale}: placements still {sorted(states & BAD_PLACEMENT)} — wait or re-push")
+            declared = (pages.get(name) or {}).get("locales", {}).get(locale) or {}
+            types = {p["type"] for p in loc["placements"]}
+            if declared.get("screenshots") and library.SCREENSHOT not in types:
+                raise review.SubmissionBlocked(f"'{name}' {locale}: the file declares screenshots but none are placed — run cpp push")
+            if declared.get("creative") and supported and library.HEADER not in types:
+                raise review.SubmissionBlocked(f"'{name}' {locale}: the file declares a creative but none is placed — run cpp push")
+        items.append(("appCustomProductPageVersion", "appCustomProductPageVersions", version["id"]))
+        out(f"  {name}: version {version['id']} ({version['state']})")
+    return review.submit(app_id, items, bearer, apply, ledger=ledger, command="cpp submit")
