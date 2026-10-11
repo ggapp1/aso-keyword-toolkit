@@ -857,16 +857,42 @@ def cmd_products_apply(args):
         print("\nDRY RUN — nothing written. Re-run with --apply to provision.")
 
 
+def _format_status(report):
+    lines = []
+    for locale, families in report.items():
+        line = ", ".join(f"{d} ×{n}" for d, n in sorted(families.items())) or "(inherits primary locale)"
+        lines.append(f"  {locale:<8} {line}")
+    return lines
+
+
+def _library_status(app_id, bearer):
+    version = asc.editable_version(app_id, bearer)
+    if not version:
+        raise asc.ASCError("No editable App Store version — screenshots are only writable in Prepare for Submission.")
+    catalog = library.Catalog.fetch(bearer)
+    report = {}
+    for locale, loc_id in sorted(asc._localizations(version["id"], bearer).items()):
+        counts = {}
+        for row in library.surface_placements("appStoreVersionLocalization", loc_id, bearer):
+            if row["type"] != library.SCREENSHOT:
+                continue
+            name = shots.LEGACY_BY_CLASS.get(catalog.display_class(row["group"]), row["group"])
+            counts[name] = counts.get(name, 0) + 1
+        report[locale] = counts
+    return version["attributes"]["versionString"], report
+
+
 def cmd_screenshots_status(args):
     config = load_config(args.config) if Path(args.config).exists() else {}
     app_id = _app_id(args, config)
     if not app_id:
         sys.exit("need an appId — pass --app-id or set app.appId in the config")
-    version, report = asc.screenshots_status(app_id, asc.token())
+    if args.engine == "library":
+        version, report = _library_status(app_id, _bearer())
+    else:
+        version, report = asc.screenshots_status(app_id, asc.token())
     print(f"editable version: {version}")
-    for locale, families in report.items():
-        line = ", ".join(f"{d} ×{n}" for d, n in sorted(families.items())) or "(inherits primary locale)"
-        print(f"  {locale:<8} {line}")
+    print("\n".join(_format_status(report)))
 
 
 def cmd_screenshots_push(args):
@@ -884,6 +910,8 @@ def cmd_screenshots_push(args):
         for problem in problems:
             print(f"  - {problem}")
         sys.exit(1)
+    if args.engine == "library":
+        return _screenshots_push_library(args, app_id, plan)
     bearer = asc.token()
     if args.mirror:
         displays = args.mirror.split(",")
@@ -926,6 +954,50 @@ def cmd_screenshots_push(args):
         print("applied — verify in App Store Connect before submitting.")
     else:
         print("\nDRY RUN — nothing written. Re-run with --apply to push.")
+
+
+def _screenshots_push_library(args, app_id, plan):
+    bearer = _bearer()
+    parent_kind, parents, feature = _default_target(app_id, bearer)
+    missing = sorted(set(plan) - set(parents))
+    if missing:
+        sys.exit(f"{', '.join(missing)}: no localization on the editable version — push metadata for it first")
+    catalog = library.Catalog.fetch(bearer)
+    lib = library.library_id(app_id, bearer)
+    requests = []
+    for locale, families in sorted(plan.items()):
+        for display, files in families.items():
+            requests.append({"locale": locale, "parent_kind": parent_kind, "parent_id": parents[locale],
+                             "placement_types": [library.SCREENSHOT], "category": library.MEDIA,
+                             "display_class": shots.LEGACY_DISPLAY_CLASS.get(display),
+                             "files": [(Path(f).name, Path(f).read_bytes()) for f in files]})
+    if args.mirror:
+        source = parents.get(args.mirror_from)
+        if not source:
+            sys.exit(f"{args.mirror_from} has no localization on the editable version")
+        rows = library.surface_placements(parent_kind, source, bearer)
+        for display in args.mirror.split(","):
+            display_class = shots.LEGACY_DISPLAY_CLASS.get(display)
+            picked = [r for r in rows if r["type"] == library.SCREENSHOT and r["state"] != library.FAILED_PLACEMENT
+                      and catalog.display_class(r["group"]) == display_class]
+            if not picked:
+                sys.exit(f"{args.mirror_from} has no {display} screenshots to mirror")
+            group = picked[0]["group"]
+            assets = [{"asset": r["asset"], "sha": r["sha"], "name": r["asset"], "specId": None} for r in picked if r["group"] == group]
+            for locale in sorted(plan):
+                if locale != args.mirror_from:
+                    requests.append({"locale": locale, "parent_kind": parent_kind, "parent_id": parents[locale],
+                                     "placement_types": [library.SCREENSHOT], "category": library.MEDIA,
+                                     "assets": assets, "groups": [group]})
+            print(f"mirroring {display} ×{len(assets)} from {args.mirror_from} into every other locale")
+    book = ledger_module.for_config(_config_path(args), args.apply)
+    try:
+        library.sync_groups(requests, catalog, feature, lib, bearer, args.apply, ledger=book, command="screenshots push",
+                            progress=lambda a: _print_actions([a]))
+    except asc.ASCError as error:
+        print(f"\naborted — {error}\nRe-running is safe: uploads are reused and unchanged groups are skipped.", flush=True)
+        sys.exit(1)
+    print("\napplied — verify in App Store Connect before submitting." if args.apply else "\nDRY RUN — nothing written. Re-run with --apply to push.")
 
 
 def _bearer():
@@ -1431,6 +1503,8 @@ def build_parser():
     screenshots_sub = screenshots_command.add_subparsers(dest="screenshots_command", required=True)
     screenshots_status = screenshots_sub.add_parser("status", help="screenshot sets per locale on the editable version")
     screenshots_status.add_argument("--app-id")
+    screenshots_status.add_argument("--engine", choices=["sets", "library"], default="sets",
+                                    help="sets = deprecated screenshot-set API (default until parity is verified); library = Asset Library")
     screenshots_status.set_defaults(func=cmd_screenshots_status)
     screenshots_push = screenshots_sub.add_parser("push", help="replace screenshot sets from DIR/<locale>/*.png (dry run unless --apply)")
     screenshots_push.add_argument("directory")
@@ -1440,6 +1514,8 @@ def build_parser():
     screenshots_push.add_argument("--mirror-from", default="en-US")
     screenshots_push.add_argument("--app-id")
     screenshots_push.add_argument("--apply", action="store_true")
+    screenshots_push.add_argument("--engine", choices=["sets", "library"], default="sets",
+                                  help="sets = deprecated screenshot-set API (default until parity is verified); library = Asset Library")
     screenshots_push.set_defaults(func=cmd_screenshots_push)
 
     assets_command = subcommands.add_parser("assets", help="App Store creatives: header and search results assets")
