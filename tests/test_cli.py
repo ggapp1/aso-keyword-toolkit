@@ -125,3 +125,64 @@ class SuggestOutput(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+import contextlib
+import io
+from unittest import mock
+
+from asokit import asc as asc_module
+from tests.fakes import FakeConnect, install
+from tests.test_creative import png_bytes
+
+
+class AssetsCommands(unittest.TestCase):
+    def setUp(self):
+        self.fake = install(self, FakeConnect())
+        self.root = Path(tempfile.mkdtemp())
+        (self.root / "asokit.json").write_text(json.dumps({"app": {"appId": 1}}))
+        self.out = self.root / "assets-out" / "default"
+        self.out.mkdir(parents=True)
+        for locale in ("en-US", "de-DE"):
+            (self.out / f"{locale}.png").write_bytes(png_bytes(5244, 2950) + locale.encode())
+        patcher = mock.patch.object(cli, "_bearer", return_value="t")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def run_cli(self, *argv):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            cli.main(["--config", str(self.root / "asokit.json"), *argv])
+        return buffer.getvalue()
+
+    def test_push_default_dry_run(self):
+        text = self.run_cli("assets", "push", str(self.out), "--target", "default")
+        self.assertIn("DRY RUN", text)
+        self.assertEqual(self.fake.writes(), [])
+
+    def test_push_default_apply_places_and_writes_ledger(self):
+        self.run_cli("assets", "push", str(self.out), "--target", "default", "--apply")
+        self.assertEqual(self.fake.group("vl-en", "G_HEADER"), ["en-US.png"])
+        self.assertEqual(self.fake.group("vl-de", "G_SEARCH"), ["de-DE.png"])
+        self.assertTrue((self.root / "asokit-ledger.jsonl").exists())
+
+    def test_push_refuses_while_experiment_runs(self):
+        self.fake.experiments = [{"id": "e", "attributes": {"name": "Icon test", "state": "IN_REVIEW"}}]
+        with self.assertRaises(SystemExit) as caught:
+            self.run_cli("assets", "push", str(self.out), "--target", "default", "--apply")
+        self.assertIn("Icon test", str(caught.exception))
+
+    def test_push_refuses_version_waiting_for_review(self):
+        self.fake.versions[0]["attributes"]["appStoreState"] = "WAITING_FOR_REVIEW"
+        with self.assertRaises(SystemExit):
+            self.run_cli("assets", "push", str(self.out), "--target", "default", "--apply")
+
+    def test_push_unknown_locale_fails_before_any_write(self):
+        (self.out / "fr-FR.png").write_bytes(png_bytes(5244, 2950))
+        with self.assertRaises(SystemExit):
+            self.run_cli("assets", "push", str(self.out), "--target", "default", "--apply")
+        self.assertEqual(self.fake.writes(), [])
+
+    def test_status_catalog_dump(self):
+        text = self.run_cli("assets", "status", "--catalog")
+        self.assertIn("PRODUCT_PAGE_HEADER_ASSET", text)

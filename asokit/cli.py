@@ -12,6 +12,10 @@
   asokit products check <file>         validate product text limits
   asokit products push <file> [--apply]  sync product text (dry run unless --apply)
   asokit products apply <file> [--apply]  provision products, prices, availability
+  asokit assets render [--variant V]   render header/search creatives from assets.json
+  asokit assets status [--catalog]     library, asset states, placements
+  asokit assets push DIR --target default [--apply]   place creatives
+  asokit assets submit DIR [--apply]   standalone review of creatives
 """
 
 import argparse
@@ -22,11 +26,15 @@ from pathlib import Path
 
 from . import (
     asc,
+    creative,
+    ledger as ledger_module,
+    library,
     metadata as meta,
     packing,
     products as prod,
     report,
     research,
+    review,
     sources,
     storefronts,
     suggest,
@@ -912,6 +920,172 @@ def cmd_screenshots_push(args):
         print("\nDRY RUN — nothing written. Re-run with --apply to push.")
 
 
+def _bearer():
+    return asc.Bearer()
+
+
+def _config_path(args):
+    return Path(args.config)
+
+
+def _require_app_id(args):
+    config = load_config(args.config) if Path(args.config).exists() else {}
+    app_id = _app_id(args, config)
+    if not app_id:
+        sys.exit("need an appId — pass --app-id or set app.appId in the config")
+    return config, app_id
+
+
+def _locales_filter(plan, locales):
+    if not locales:
+        return plan
+    wanted = set(locales.split(","))
+    return {k: v for k, v in plan.items() if k in wanted}
+
+
+def _print_actions(actions):
+    for a in actions:
+        print(f"  {a.get('locale', ''):<8} {a['type']:<32} {str(a.get('group')):<28} {a['mode']:<14} "
+              f"+{a.get('place', 0)} -{a.get('unplace', 0)}", flush=True)
+
+
+def cmd_assets_render(args):
+    from . import render
+    cfg_path = Path(args.assets) if args.assets else _config_path(args).resolve().parent / "assets.json"
+    try:
+        cfg = render.load_config(cfg_path)
+        variants = args.variant or sorted(cfg.get("variants", {}))
+        failed_any = False
+        out_dir = Path(args.out) if args.out else cfg["_root"] / "assets-out"
+        for name in variants:
+            result = render.render_variant(cfg, name, out_dir, locales=args.locales.split(",") if args.locales else None,
+                                           lint=not args.no_lint, strict_lint=args.strict_lint)
+            print(f"{name}: {len(result['written'])} written → {out_dir / name}")
+            for row in result["report"]:
+                flags = [f for f, on in (("TIGHT", row["tight"]), ("fallback-headline", row["fallback"])) if on]
+                if flags:
+                    print(f"  {row['locale']:<8} verb {row['verb_px']}px×{row['verb_lines']}  desc {row['descriptor_px']}px×"
+                          f"{row['descriptor_lines']}  device {row['device_width_pct']}%  {' '.join(flags)}")
+            for locale, reason in sorted(result["failed"].items()):
+                print(f"  FAILED {locale}: {reason}")
+                failed_any = True
+            if result["unlinted"]:
+                print(f"  unlinted (needs native review): {', '.join(result['unlinted'])}")
+    except render.RenderError as error:
+        sys.exit(str(error))
+    if failed_any:
+        sys.exit(1)
+
+
+def cmd_assets_status(args):
+    _, app_id = _require_app_id(args)
+    bearer = _bearer()
+    catalog = library.Catalog.fetch(bearer)
+    if args.catalog:
+        print("\n".join(catalog.summary()))
+        return
+    lib = library.library_id(app_id, bearer)
+    images = asc.call_all("GET", f"/appAssetLibraries/{lib}/images?limit=200", bearer)
+    counts = {}
+    for row in images:
+        key = (row["attributes"].get("category"), row["attributes"].get("state"))
+        counts[key] = counts.get(key, 0) + 1
+    print(f"asset library {lib}: {len(images)} images")
+    for (category, state), n in sorted(counts.items()):
+        print(f"  {category:<30} {state:<24} {n}")
+    version = asc.editable_version(app_id, bearer)
+    if not version:
+        print("no editable App Store version")
+        return
+    print(f"editable version {version['attributes']['versionString']} ({version['attributes']['appStoreState']}):")
+    for locale, loc_id in sorted(asc._localizations(version["id"], bearer).items()):
+        rows = [p for p in library.surface_placements("appStoreVersionLocalization", loc_id, bearer)
+                if p["type"] in (library.HEADER, library.SEARCH)]
+        line = ", ".join(f"{p['type'].split('_')[0].lower()}:{p['state']}" for p in rows) or "(no header/search assets)"
+        print(f"  {locale:<8} {line}")
+
+
+def _default_target(app_id, bearer):
+    version = asc.editable_version(app_id, bearer)
+    if not version or version["attributes"]["appStoreState"] not in library.VERSION_PLACEABLE:
+        sys.exit("no App Store version in Prepare for Submission — create the next version in App Store Connect first; "
+                 "default-page creatives ride with it")
+    running = library.active_experiment(app_id, bearer)
+    if running:
+        sys.exit(f"product page optimization test '{running}' is in review or running — placements on the default page "
+                 "are blocked while it runs; stop it or wait")
+    return "appStoreVersionLocalization", asc._localizations(version["id"], bearer), "APP_STORE_VERSIONS"
+
+
+def _creative_plan(args):
+    plan = _locales_filter(creative.plan_from_directory(args.directory), args.locales)
+    problems = creative.check(plan)
+    if problems:
+        print("validation failed — nothing sent:")
+        for problem in problems:
+            print(f"  - {problem}")
+        sys.exit(1)
+    if not plan:
+        sys.exit(f"no <locale>.png files in {args.directory}")
+    return plan
+
+
+def _resolve_target(args, app_id, bearer):
+    if args.target == "default":
+        return _default_target(app_id, bearer)
+    sys.exit(f"unknown target '{args.target}' — use 'default' or 'cpp:<page name>'")
+
+
+def cmd_assets_push(args):
+    _, app_id = _require_app_id(args)
+    plan = _creative_plan(args)
+    bearer = _bearer()
+    parent_kind, parents, feature = _resolve_target(args, app_id, bearer)
+    missing = sorted(set(plan) - set(parents))
+    if missing:
+        sys.exit(f"no localization on the target for: {', '.join(missing)} — nothing sent")
+    catalog = library.Catalog.fetch(bearer)
+    lib = library.library_id(app_id, bearer)
+    requests = [{"locale": locale, "parent_kind": parent_kind, "parent_id": parents[locale],
+                 "placement_types": [library.HEADER, library.SEARCH], "category": library.CREATIVE,
+                 "files": [(path.name, path.read_bytes())]} for locale, path in sorted(plan.items())]
+    book = ledger_module.for_config(_config_path(args), args.apply)
+    try:
+        actions = library.sync_groups(requests, catalog, feature, lib, bearer, args.apply, ledger=book,
+                                      command="assets push", progress=lambda a: _print_actions([a]))
+    except asc.ASCError as error:
+        print(f"\naborted — {error}\nRe-running is safe: uploads are reused and unchanged groups are skipped.", flush=True)
+        sys.exit(1)
+    unsupported = [a for a in actions if a["mode"] == "unsupported"]
+    if unsupported:
+        print(f"note: {len(unsupported)} placement(s) skipped — the catalog has no such type under {feature}")
+    print("\napplied — verify in App Store Connect." if args.apply else "\nDRY RUN — nothing written. Re-run with --apply to push.")
+
+
+def cmd_assets_submit(args):
+    _, app_id = _require_app_id(args)
+    plan = _creative_plan(args)
+    bearer = _bearer()
+    lib = library.library_id(app_id, bearer)
+    uploader = library.Uploader(lib, bearer, args.apply)
+    assets = {locale: uploader.ensure(path.name, path.read_bytes(), library.CREATIVE) for locale, path in sorted(plan.items())}
+    if args.apply and uploader.new_ids:
+        states = library.wait_processed(lib, uploader.new_ids, bearer)
+        bad = [i for i, s in states.items() if s.get("state") not in library.PROCESSED]
+        if bad:
+            sys.exit(f"Apple did not accept {len(bad)} upload(s): {', '.join(bad)} — nothing submitted")
+    items = [("appAssetLibraryImage", "appAssetLibraryImages", a["asset"]) for a in assets.values()]
+    for locale, a in assets.items():
+        print(f"  {locale:<8} {a['name']:<24} {a['status']}")
+    book = ledger_module.for_config(_config_path(args), args.apply)
+    try:
+        result = review.submit(app_id, items, bearer, args.apply, ledger=book, command="assets submit")
+    except review.SubmissionBlocked as error:
+        sys.exit(str(error))
+    print(f"submission {result['submission']}: +{len(result['add'])} item(s)")
+    print("submitted for review." if result["submitted"] else "\nDRY RUN — nothing written. Re-run with --apply to submit.")
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="asokit",
@@ -1072,6 +1246,33 @@ def build_parser():
     screenshots_push.add_argument("--apply", action="store_true")
     screenshots_push.set_defaults(func=cmd_screenshots_push)
 
+    assets_command = subcommands.add_parser("assets", help="App Store creatives: header and search results assets")
+    assets_sub = assets_command.add_subparsers(dest="assets_command", required=True)
+    assets_render = assets_sub.add_parser("render", help="render creatives from assets.json (needs the 'render' extra)")
+    assets_render.add_argument("--assets", help="path to assets.json (default: next to the config)")
+    assets_render.add_argument("--variant", action="append", help="variant to render (repeatable; default: all)")
+    assets_render.add_argument("--locales", help="comma-separated subset")
+    assets_render.add_argument("--out", help="output directory (default: assets-out next to assets.json)")
+    assets_render.add_argument("--no-lint", action="store_true", help="skip the App Store rejection lint")
+    assets_render.add_argument("--strict-lint", action="store_true", help="fail locales whose language has no lint list")
+    assets_render.set_defaults(func=cmd_assets_render)
+    assets_status = assets_sub.add_parser("status", help="library, asset states and header/search placements")
+    assets_status.add_argument("--app-id")
+    assets_status.add_argument("--catalog", action="store_true", help="dump Apple's placement/spec catalog instead")
+    assets_status.set_defaults(func=cmd_assets_status)
+    assets_push = assets_sub.add_parser("push", help="place DIR/<locale>.png as header + search asset (dry run unless --apply)")
+    assets_push.add_argument("directory")
+    assets_push.add_argument("--target", required=True, help="'default' or 'cpp:<page name>'")
+    assets_push.add_argument("--locales")
+    assets_push.add_argument("--app-id")
+    assets_push.add_argument("--apply", action="store_true")
+    assets_push.set_defaults(func=cmd_assets_push)
+    assets_submit = assets_sub.add_parser("submit", help="send DIR/<locale>.png to App Review on their own, placing nothing")
+    assets_submit.add_argument("directory")
+    assets_submit.add_argument("--locales")
+    assets_submit.add_argument("--app-id")
+    assets_submit.add_argument("--apply", action="store_true")
+    assets_submit.set_defaults(func=cmd_assets_submit)
     return parser
 
 
