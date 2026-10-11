@@ -17,9 +17,9 @@ from . import creative
 CANVAS = (5244, 2950)
 ZWSP = "​"
 DEFAULT_TYPE = {
-    "verb": {"size": 520, "min": 300, "step": 10, "lines": 1, "leading": 1.02},
-    "descriptor": {"size": 250, "min": 170, "step": 6, "lines": 2, "leading": 1.12},
-    "tight": {"verb": 340, "descriptor": 190},
+    "verb": {"size": 360, "min": 220, "step": 10, "lines": 2, "leading": 1.02},
+    "descriptor": {"size": 220, "min": 150, "step": 6, "lines": 2, "leading": 1.12},
+    "tight": {"verb": 260, "descriptor": 170},
 }
 
 

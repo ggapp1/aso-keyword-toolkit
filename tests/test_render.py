@@ -58,6 +58,20 @@ class RenderTests(unittest.TestCase):
             self.assertTrue(bbox[0] >= x0 and bbox[1] >= y0 and bbox[2] <= x1 and bbox[3] <= y1, (bbox, (x0, y0, x1, y1)))
             self.assertTrue((Path(tmp) / "out" / "_contact" / "v.png").exists())
 
+    def test_default_type_fits_a_realistic_headline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = write_config(tmp, {"v": variant({"en-US": ["SEE THE PATTERNS", "MOOD, SLEEP & MEDS IN ONE PLACE"]},
+                                                  captures=("{ui}/one.png", "{ui}/two.png"))})
+            del cfg["type"]
+            result = render.render_variant(cfg, "v", Path(tmp) / "out")
+            self.assertEqual(result["failed"], {})
+            image = Image.open(Path(tmp) / "out" / "v" / "en-US.png")
+            self.assertEqual((image.size, image.mode), ((5244, 2950), "RGB"))
+            from PIL import ImageChops
+            bbox = ImageChops.difference(image, Image.new("RGB", image.size, BG)).getbbox()
+            x0, y0, x1, y1 = render.safe_box(5244, 2950, 0.03)
+            self.assertTrue(bbox[0] >= x0 and bbox[1] >= y0 and bbox[2] <= x1 and bbox[3] <= y1, (bbox, (x0, y0, x1, y1)))
+
     def test_ltr_devices_trail_on_the_right(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = write_config(tmp, {"v": variant({"en-US": ["LOG", "Patterns"]})})
