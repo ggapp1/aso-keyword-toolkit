@@ -226,17 +226,25 @@ def media_differs(media, placements, creative_supported):
     return False
 
 
-def _keyword_actions(name, locale, localization, wanted, current, live):
+def _keyword_actions(name, locale, localization, wanted, current, live, visible=False):
     wanted_set = {norm(k) for k in wanted}
     current_set = set(current)
     actions = []
     add = sorted(wanted_set - current_set)
     remove = sorted(current_set - wanted_set)
+    extra = {"visible": True} if visible else {}
     if add:
-        actions.append({"op": "add_keywords", "page": name, "locale": locale, "localization": localization, "keywords": add, "live": live})
+        actions.append({"op": "add_keywords", "page": name, "locale": locale, "localization": localization, "keywords": add,
+                        "live": live, **extra})
     if remove:
-        actions.append({"op": "remove_keywords", "page": name, "locale": locale, "localization": localization, "keywords": remove, "live": live})
+        actions.append({"op": "remove_keywords", "page": name, "locale": locale, "localization": localization, "keywords": remove,
+                        "live": live, **extra})
     return actions
+
+
+def changes_live_routing(action):
+    """A keyword edit on a live version of a visible page reroutes organic search at push time."""
+    return action["op"] in ("add_keywords", "remove_keywords") and bool(action.get("live")) and bool(action.get("visible"))
 
 
 def plan(page, snap, doc, creative_root="assets-out", locales=None, prune=False, creative_supported=True):
@@ -275,6 +283,9 @@ def plan(page, snap, doc, creative_root="assets-out", locales=None, prune=False,
         extras = []  # never delete the last localization, so never version for it either
 
     if state in LIVE:
+        # In-place edits on a live version: on a visible (published) page they take effect at push.
+        visible = bool(snap.get("visible"))
+        extra = {"visible": True} if visible else {}
         actions = []
         for loc, entry in sorted(wanted.items()):
             if loc not in current:
@@ -282,8 +293,8 @@ def plan(page, snap, doc, creative_root="assets-out", locales=None, prune=False,
             here = current[loc]
             if (entry.get("promotionalText") or "") != (here.get("promotionalText") or ""):
                 actions.append({"op": "update_promo", "page": name, "locale": loc, "localization": here["id"],
-                                "promotionalText": entry.get("promotionalText") or "", "live": True})
-            actions += _keyword_actions(name, loc, here["id"], entry["keywords"], here["keywords"], live=True)
+                                "promotionalText": entry.get("promotionalText") or "", "live": True, **extra})
+            actions += _keyword_actions(name, loc, here["id"], entry["keywords"], here["keywords"], live=True, visible=visible)
         needs_version = (deep_link_changed or extras or added
                          or any(media_differs(media[loc], current[loc]["placements"], creative_supported) for loc in wanted if loc in current))
         if needs_version:

@@ -172,6 +172,9 @@ def describe(action):
     op = action["op"]
     where = f"{action['page']}" + (f" {action['locale']}" if action.get("locale") else "")
     live = " (live, in place)" if action.get("live") else ""
+    if action.get("live") and action.get("visible"):
+        live = (" (live, in place; VISIBLE — routing changes now)" if cpp.changes_live_routing(action)
+                else " (live, in place; VISIBLE — shoppers see it now)")
     if op in ("add_keywords", "remove_keywords"):
         return f"  {op:<20} {where}: {', '.join(action['keywords'])}{live}"
     if op == "create_page":
@@ -330,7 +333,7 @@ def _execute(app_id, page, snap, actions, media, ctx, catalog, bearer, ledger, o
 
 
 def push(app_id, doc, bearer, apply, creative_root="assets-out", pages=None, locales=None, prune=False,
-         allow_protected=(), lint=True, ledger=NULL, out=print):
+         allow_protected=(), lint=True, ledger=NULL, out=print, allow_live_routing=False):
     """Validate, plan every in-scope page, then (with apply) write in phases:
 
     0. hide any in-scope page that is visible but has never had an approved
@@ -340,11 +343,17 @@ def push(app_id, doc, bearer, apply, creative_root="assets-out", pages=None, loc
     2. keyword removals on every page, so a keyword moving between pages is freed before it is linked;
     3. per page: metadata, keyword links, placements of the prepared assets. A created page or
        version is re-read by id and re-planned once; a re-plan never creates again.
+
+    Keyword edits on the live version of a visible (published) page reroute organic search
+    at push time, so they are a validation problem unless `allow_live_routing`. The result
+    names the pages whose routing (`routing_changed`) or visible text (`visible_changed`)
+    changed in this run.
     """
     catalog = library.Catalog.fetch(bearer)
     ctx = online_context(app_id, doc, bearer, catalog)
     problems, warnings = cpp.check(doc, creative_root, allow_protected, lint, online=ctx, scope=pages)
-    result = {"problems": problems, "warnings": warnings, "actions": [], "context": ctx}
+    result = {"problems": problems, "warnings": warnings, "actions": [], "context": ctx,
+              "routing_changed": [], "visible_changed": []}
     selected = [p for p in cpp.expand(doc) if not pages or p["name"] in pages] if not problems else []
     unknown = sorted(set(pages or []) - {p["name"] for p in cpp.expand(doc)}) if not problems else []
     if unknown:
@@ -359,6 +368,11 @@ def push(app_id, doc, bearer, apply, creative_root="assets-out", pages=None, loc
         for action in actions:
             out(describe(action))
         plans.append((page, snap, actions, _media_requests(page, actions, doc, ctx, creative_root, locales)))
+    rerouting = sorted({a["page"] for _, _, actions, _ in plans for a in actions if cpp.changes_live_routing(a)})
+    if rerouting and not allow_live_routing:
+        result["problems"] += [f"{name}: keyword edits on this visible, live page would change live routing now — "
+                               "re-run with --allow-live-routing" for name in rerouting]
+        return result
     if not apply:
         result["actions"] = [a for _, _, actions, _ in plans for a in actions]
         return result
@@ -402,6 +416,8 @@ def push(app_id, doc, bearer, apply, creative_root="assets-out", pages=None, loc
             raise asc.ASCError(f"{page['name']}: still needs a new page/version after creating one — stopping")
         executed, _ = _execute(app_id, page, snap, actions, media, ctx, catalog, bearer, ledger, out)
         result["actions"] += executed
+    result["routing_changed"] = sorted({a["page"] for a in result["actions"] if cpp.changes_live_routing(a)})
+    result["visible_changed"] = sorted({a["page"] for a in result["actions"] if a.get("live") and a.get("visible")})
     return result
 
 

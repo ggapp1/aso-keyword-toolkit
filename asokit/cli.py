@@ -1331,7 +1331,8 @@ def cmd_cpp_push(args):
         result = cpp_apply.push(app_id, doc, bearer, args.apply, creative_root=args.creative_root,
                                 pages=_pages_arg(args, required=False), locales=_csv_list(args.locales) or None,
                                 prune=args.prune, allow_protected=_csv_list(args.allow_protected),
-                                lint=not args.no_lint, ledger=book, out=print)
+                                lint=not args.no_lint, ledger=book, out=print,
+                                allow_live_routing=args.allow_live_routing)
     except asc.ASCError as error:
         _abort(error, "Re-running is safe: every step re-diffs against live state.")
     _report(result["problems"], result["warnings"])
@@ -1345,8 +1346,17 @@ def cmd_cpp_push(args):
         _write_ads(args.ads_export, cpp.ads_rows(_expand(doc), snapshots))
     if not result["actions"]:
         print("no changes — App Store Connect already matches cpp.json")
-    print("\napplied — pages stay hidden until `asokit cpp publish`." if args.apply
-          else "\nDRY RUN — nothing written. Re-run with --apply to push.")
+    if not args.apply:
+        print("\nDRY RUN — nothing written. Re-run with --apply to push.")
+        return
+    if result["routing_changed"]:
+        print(f"\napplied — organic routing changed now for: {', '.join(result['routing_changed'])} "
+              "(keyword edits on visible, live pages). Other changes wait for review and `asokit cpp publish`.")
+    else:
+        print("\napplied — organic routing unchanged; new pages stay hidden until `asokit cpp publish`.")
+    others = [name for name in result["visible_changed"] if name not in result["routing_changed"]]
+    if others:
+        print(f"promotional text changed on visible page(s): {', '.join(others)} — shoppers see it now.")
 
 
 def cmd_cpp_publish(args):
@@ -1627,6 +1637,8 @@ def build_parser():
     cpp_push.add_argument("--creative-root", default="assets-out")
     cpp_push.add_argument("--no-lint", action="store_true")
     cpp_push.add_argument("--ads-export")
+    cpp_push.add_argument("--allow-live-routing", action="store_true",
+                          help="allow keyword edits on visible, approved pages (they change organic routing at push)")
     cpp_push.set_defaults(func=cmd_cpp_push)
 
     cpp_publish = cpp_sub.add_parser("publish", help="make approved pages visible — organic routing goes live")

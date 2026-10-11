@@ -688,8 +688,9 @@ Apple's:
   `--allow-protected kw1,kw2`. Use it for the terms your default page has to
   keep winning.
 
-**The lifecycle is four explicit steps**, and organic routing changes only at
-the last one:
+**The lifecycle is four explicit steps.** For a new page, organic routing
+changes only at the last one. The one exception is a page you have already
+published — see **Live** below:
 
 ```bash
 asokit cpp check                                   # offline + online validation
@@ -704,20 +705,36 @@ What `cpp push` does to a page depends on its state:
 - **Missing** — created hidden, with its localizations, keywords, screenshots
   and creative.
 - **Live** — promotional text and keyword changes are edited in place on the
-  live version, with no new version and no review. Screenshot, creative or
-  deep-link changes open a new version for review.
+  live version, with no new version and no review. On a page that is already
+  **visible** (published), that means they take effect **at push**: keyword
+  edits reroute organic search immediately and new promotional text is shown
+  immediately. Push refuses keyword edits on a visible, live page unless you
+  pass `--allow-live-routing`; the dry run labels such actions
+  `VISIBLE — routing changes now`, and the summary names every page whose
+  routing changed. On a hidden page the same edits change nothing until you
+  publish. Screenshot, creative or deep-link changes open a new version for
+  review.
+- **Visible but never approved** — a page that is visible with no approved
+  version (a lost create response or a failed hide) is hidden first, before
+  anything else in the run, so approval can't start routing on its own.
 - **In review** — skipped until review finishes.
 - **Unchanged** — nothing is written; a second push is a no-op.
 
 Across all pages in a run, keyword removals happen before additions, so moving
 a keyword from one page to another never trips ownership. `--pages` and
-`--locales` scope a push; `--locales` never deletes anything. `--prune`
+`--locales` scope a push; `--locales` never deletes anything. With `--pages`,
+a page outside the scope keeps its live keywords, so moving a keyword from
+page A to page B needs both in scope (`--pages A,B`); `cpp check --pages B`
+reports the same problem. `--prune`
 deletes page localizations missing from the file, but never a page's last
 localization.
 
 `cpp submit` and `cpp publish` require `--pages` and validate every named
 page before doing anything. `submit` refuses if a locale or device family
-declared in the file isn't actually placed on the page, and won't add pages to
+declared in the file isn't actually placed on the page (a declared creative
+needs both its header and search placement), refuses a page that is visible
+but has never been approved (hide it with `cpp publish --pages NAME --hide
+--apply`), and won't add pages to
 a draft submission that already holds something else, such as your app
 version. `publish` refuses pages that aren't approved.
 
@@ -901,7 +918,7 @@ serves a different audience. That's what the competitor table is for — read it
 | `asokit assets submit DIR --apply` | send creatives to App Review on their own |
 | `asokit cpp check` | validate `cpp.json`, keyword ownership and pools |
 | `asokit cpp status` | live pages, versions, visibility, keywords |
-| `asokit cpp push --apply` | converge custom product pages to `cpp.json` (new pages hidden) |
+| `asokit cpp push --apply` | converge custom product pages to `cpp.json` (new pages hidden; `--allow-live-routing` for keyword edits on published pages) |
 | `asokit cpp submit --pages NAME --apply` | send page versions to App Review |
 | `asokit cpp publish --pages NAME --apply` | make approved pages visible |
 | `asokit nominations check` | validate `nominations.json` |

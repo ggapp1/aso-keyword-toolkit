@@ -111,6 +111,52 @@ class PushTests(unittest.TestCase):
         self.assertTrue(all(a["live"] for a in result["actions"]))
         self.assertTrue(all(sorted(l["keywords"]) == ["borderline", "bpd"] for l in self.fake.cpp_locs.values()))
 
+    def publish_live(self):
+        self.push()
+        self.approve_all()
+        self.fake.pages[self.fake.page_named("BPD tracker")]["visible"] = True
+
+    def test_keyword_edit_on_visible_live_page_is_refused_without_flag(self):
+        self.publish_live()
+        self.doc["pages"][0]["locales"]["en-US"]["keywords"] = ["bpd"]
+        start = len(self.fake.writes())
+        result = self.push()
+        self.assertTrue(any("would change live routing" in p and "--allow-live-routing" in p for p in result["problems"]),
+                        result["problems"])
+        self.assertEqual(self.fake.writes()[start:], [])
+        self.assertTrue(any("VISIBLE — routing changes now" in line for line in self.lines), self.lines)
+
+    def test_keyword_edit_on_visible_live_page_with_flag(self):
+        self.publish_live()
+        self.doc["pages"][0]["locales"]["en-US"]["keywords"] = ["bpd"]
+        result = self.push(allow_live_routing=True)
+        self.assertEqual(result["problems"], [])
+        self.assertEqual(result["routing_changed"], ["BPD tracker"])
+        en_us = next(l for l in self.fake.cpp_locs.values() if l["locale"] == "en-US")
+        self.assertEqual(en_us["keywords"], ["bpd"])
+
+    def test_promo_edit_on_visible_live_page_is_allowed_and_labelled(self):
+        self.publish_live()
+        self.doc["pages"][0]["locales"]["en-US"]["promotionalText"] = "Track mood swings."
+        self.doc["pages"][0]["locales"]["en-GB"] = {"promotionalText": "Track mood swings.", "keywords": ["bpd", "borderline"],
+                                                     "screenshots": self.doc["pages"][0]["locales"]["en-US"]["screenshots"],
+                                                     "creative": "bpd"}
+        self.lines.clear()
+        result = self.push()
+        self.assertEqual(result["problems"], [])
+        self.assertEqual({a["op"] for a in result["actions"]}, {"update_promo"})
+        self.assertEqual(result["routing_changed"], [])
+        self.assertEqual(result["visible_changed"], ["BPD tracker"])
+        self.assertTrue(all("VISIBLE" in line for line in self.lines), self.lines)
+
+    def test_hidden_live_page_keyword_edit_needs_no_flag(self):
+        self.push()
+        self.approve_all()
+        self.doc["pages"][0]["locales"]["en-US"]["keywords"] = ["bpd"]
+        result = self.push()
+        self.assertEqual(result["problems"], [])
+        self.assertEqual(result["routing_changed"], [])
+
     def test_live_media_change_creates_version_and_fills_it(self):
         self.push()
         page_id = self.fake.page_named("BPD tracker")

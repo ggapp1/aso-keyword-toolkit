@@ -363,6 +363,21 @@ class CppCommands(unittest.TestCase):
         text = self.run_cli_aborting("cpp", "check", "--pages", "BPD tracker")
         self.assertIn("already belongs to page 'Alpha'", text)
 
+    def test_push_summary_names_pages_whose_routing_changed(self):
+        self.run_cli("cpp", "push", "--apply")
+        for version in self.fake.cpp_versions.values():
+            version["state"] = "APPROVED"
+        page_id = self.fake.page_named("BPD tracker")
+        self.fake.pages[page_id]["visible"] = True
+        doc = json.loads((self.root / "cpp.json").read_text())
+        doc["pages"][0]["locales"]["en-US"]["keywords"] = ["bpd"]
+        (self.root / "cpp.json").write_text(json.dumps(doc))
+        text = self.run_cli_aborting("cpp", "push", "--apply")
+        self.assertIn("--allow-live-routing", text)
+        text = self.run_cli("cpp", "push", "--apply", "--allow-live-routing")
+        self.assertIn("organic routing changed now for: BPD tracker", text)
+        self.assertNotIn("stay hidden until", text)
+
     def test_other_abort_still_says_rerun_is_safe(self):
         with mock.patch.object(cli.cpp_apply, "push", side_effect=cli.asc.ASCError("boom")):
             text = self.run_cli_aborting("cpp", "push", "--apply")
