@@ -354,6 +354,15 @@ class CppCommands(unittest.TestCase):
         self.assertIn("change the image", text)
         self.assertNotIn("Re-running is safe", text)
 
+    def test_check_pages_scope_flags_out_of_scope_live_owner(self):
+        self.fake.add_page("Alpha", locales={"en-US": {"keywords": ["bpd"]}})
+        doc = json.loads((self.root / "cpp.json").read_text())
+        doc["pages"].append(cpp_page(name="Alpha", keywords=()))
+        (self.root / "cpp.json").write_text(json.dumps(doc))
+        self.assertIn("ok", self.run_cli("cpp", "check").lower())
+        text = self.run_cli_aborting("cpp", "check", "--pages", "BPD tracker")
+        self.assertIn("already belongs to page 'Alpha'", text)
+
     def test_other_abort_still_says_rerun_is_safe(self):
         with mock.patch.object(cli.cpp_apply, "push", side_effect=cli.asc.ASCError("boom")):
             text = self.run_cli_aborting("cpp", "push", "--apply")

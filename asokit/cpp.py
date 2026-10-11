@@ -101,7 +101,12 @@ def _protected(doc, locale):
     return {norm(k) for k in table.get("*", []) + table.get(locale, [])}
 
 
-def check(doc, creative_root="assets-out", allow_protected=(), lint=True, online=None):
+def check(doc, creative_root="assets-out", allow_protected=(), lint=True, online=None, scope=None):
+    """Validate the file (offline) and, with `online`, against live state.
+
+    `scope` is the `--pages` list a push will act on (None = every page). A page
+    in the file but outside the scope keeps its live keywords after the push —
+    its removals never run — so those keywords still count as owned by it."""
     problems, warnings = [], []
     try:
         pages = expand(doc, problems)
@@ -112,10 +117,13 @@ def check(doc, creative_root="assets-out", allow_protected=(), lint=True, online
         problems.append(f"page name '{name}' appears more than once")
     allow = {norm(k) for k in allow_protected}
     owner = {}
+    held_outside = set()   # pages in the file but outside the push scope
     if online:
         for live_name, by_locale in online["live_keywords"].items():
             if live_name in names:
-                continue
+                if scope is None or live_name in scope:
+                    continue
+                held_outside.add(live_name)
             for locale, keywords in by_locale.items():
                 for keyword in keywords:
                     owner[(locale, keyword)] = live_name
@@ -163,7 +171,9 @@ def check(doc, creative_root="assets-out", allow_protected=(), lint=True, online
                                     f"pass --allow-protected {keyword} to assign it anyway")
                 other = owner.get((locale, keyword))
                 if other and other != name:
-                    problems.append(f"{where}: keyword '{keyword}' already belongs to page '{other}' in {locale}")
+                    hint = (f" — '{other}' is outside --pages, so its keywords are not removed in this run; "
+                            f"include it (--pages {other},{name})" if other in held_outside else "")
+                    problems.append(f"{where}: keyword '{keyword}' already belongs to page '{other}' in {locale}{hint}")
                 owner[(locale, keyword)] = name
                 if online:
                     pool = online["pools"].get(locale)

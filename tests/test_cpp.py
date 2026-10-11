@@ -68,6 +68,17 @@ class CheckTests(unittest.TestCase):
         protected = kwargs.pop("protected", None)
         return cpp.check(make_doc(tmp, pages, protected), **kwargs)
 
+    def test_scoped_move_counts_out_of_scope_live_owner(self):
+        pages = [page(name="A", keywords=()), page(name="B", keywords=("bpd",))]
+        ctx = online(live_pages={"A"}, live_keywords={"A": {"en-US": {"bpd"}}})
+        with tempfile.TemporaryDirectory() as tmp:
+            problems, _ = self.check(tmp, pages, online=ctx, scope=["B"])
+        self.assertTrue(any("'bpd' already belongs to page 'A'" in p and "--pages" in p for p in problems), problems)
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self.check(tmp, pages, online=ctx, scope=["A", "B"])[0], [])
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(self.check(tmp, pages, online=ctx)[0], [])
+
     def test_valid_page_passes_offline_and_online(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(self.check(tmp, [page()])[0], [])

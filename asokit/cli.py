@@ -1296,7 +1296,8 @@ def cmd_cpp_check(args):
         _, app_id = _require_app_id(args)
         bearer = _bearer()
         online = cpp_apply.online_context(app_id, doc, bearer, library.Catalog.fetch(bearer))
-    problems, warnings = cpp.check(doc, args.creative_root, _csv_list(args.allow_protected), not args.no_lint, online=online)
+    problems, warnings = cpp.check(doc, args.creative_root, _csv_list(args.allow_protected), not args.no_lint, online=online,
+                                   scope=_pages_arg(args, required=False))
     _report(problems, warnings)
     print(f"ok — {len(_expand(doc))} page(s) valid{' (offline: keyword pools not checked)' if args.offline else ''}")
 
@@ -1609,6 +1610,7 @@ def build_parser():
     cpp_check.add_argument("--allow-protected", help="comma-separated protected keywords to allow")
     cpp_check.add_argument("--creative-root", default="assets-out")
     cpp_check.add_argument("--no-lint", action="store_true")
+    cpp_check.add_argument("--pages", help="comma-separated page names a scoped push would act on")
     cpp_check.set_defaults(func=cmd_cpp_check)
 
     cpp_status = cpp_sub.add_parser("status", help="live pages, versions, visibility and keywords")

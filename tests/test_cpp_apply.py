@@ -202,6 +202,18 @@ class PushTests(unittest.TestCase):
         tail = [(e[0], e[1]) for e in self.fake.log[start:] if e[1].endswith("/relationships/searchKeywords")]
         self.assertEqual([m for m, _ in tail], ["DELETE", "POST"])
 
+    def test_scoped_keyword_move_needs_both_pages_in_scope(self):
+        self.doc["pages"] = [page(name="Alpha", keywords=("bpd",)), page(name="Beta", keywords=())]
+        self.push()
+        self.doc["pages"][0]["locales"]["en-US"]["keywords"] = []
+        self.doc["pages"][1]["locales"]["en-US"]["keywords"] = ["bpd"]
+        start = len(self.fake.writes())
+        result = self.push(pages=["Beta"])
+        self.assertTrue(any("already belongs to page 'Alpha'" in p for p in result["problems"]), result["problems"])
+        self.assertEqual(self.fake.writes()[start:], [])
+        result = self.push(pages=["Alpha", "Beta"])
+        self.assertEqual(result["problems"], [])
+
     def test_create_patches_hidden_unless_response_says_hidden(self):
         self.fake.create_visible = None   # attribute missing/unknown in the response
         self.push()

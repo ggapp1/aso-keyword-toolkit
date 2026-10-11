@@ -301,7 +301,7 @@ def push(app_id, doc, bearer, apply, creative_root="assets-out", pages=None, loc
     """
     catalog = library.Catalog.fetch(bearer)
     ctx = online_context(app_id, doc, bearer, catalog)
-    problems, warnings = cpp.check(doc, creative_root, allow_protected, lint, online=ctx)
+    problems, warnings = cpp.check(doc, creative_root, allow_protected, lint, online=ctx, scope=pages)
     result = {"problems": problems, "warnings": warnings, "actions": [], "context": ctx}
     selected = [p for p in cpp.expand(doc) if not pages or p["name"] in pages] if not problems else []
     unknown = sorted(set(pages or []) - {p["name"] for p in cpp.expand(doc)}) if not problems else []
