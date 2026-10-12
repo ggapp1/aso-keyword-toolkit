@@ -419,6 +419,17 @@ def cmd_research(args):
     print("  asokit metadata check draft.json")
 
 
+def cmd_digest(args):
+    """One block summarising every researched market (reads scores.json, no network)."""
+    config = load_config(args.config) if Path(args.config).exists() else {}
+    root = Path(args.dir or config.get("app", {}).get("outputDir", "aso"))
+    found = {path.parent.name: json.loads(path.read_text()) for path in sorted(root.glob("*/scores.json"))}
+    if not found:
+        sys.exit(f"no <market>/scores.json under {root} — run `asokit research --all` first")
+    for line in report.digest(found, limit=args.limit):
+        print(line)
+
+
 def cmd_metadata_check(args):
     data = json.loads(Path(args.file).read_text())
     problems = meta.check(data, strict=args.strict, allow_partial=args.allow_partial)
@@ -1552,6 +1563,13 @@ def build_parser():
     )
     research_command.add_argument("--no-cache", action="store_true")
     research_command.set_defaults(func=cmd_research)
+
+    digest = subcommands.add_parser(
+        "digest", help="all researched markets in one summary (top targetable terms, current ranks)"
+    )
+    digest.add_argument("--limit", type=int, default=16, help="terms per market")
+    digest.add_argument("--dir", help="where research wrote its output")
+    digest.set_defaults(func=cmd_digest)
 
     metadata_command = subcommands.add_parser("metadata", help="validate and sync metadata")
     metadata_sub = metadata_command.add_subparsers(dest="metadata_command", required=True)

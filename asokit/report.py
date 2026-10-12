@@ -112,3 +112,28 @@ def _competitors(scores, limit=20):
             entry["hits"] += 1
             entry["bestRank"] = min(entry["bestRank"], rank)
     return sorted(seen.values(), key=lambda item: -item["hits"])[:limit]
+
+
+def digest(scores_by_market, limit=16):
+    """Every market's research in one plain-text block, for composing metadata.
+
+    Per market: the top targetable terms by opportunity, what the app already
+    ranks for, and the off-category terms to ignore. Competitor app names and
+    off-category terms are flagged by research and are never targets.
+    """
+    lines = []
+    for market, rows in sorted(scores_by_market.items()):
+        targetable = [r for r in rows if not r.get("looksLikeAppName") and not r.get("offCategory")]
+        targetable.sort(key=lambda r: -(r.get("opportunity") or 0))
+        lines += ["", f"### {market}  ({len(targetable)} targetable of {len(rows)})"]
+        for r in targetable[:limit]:
+            lines.append(f"  {r['term']:<32} pop={r.get('popularity', 0):>3} comp={r.get('competitionTier', '-')} "
+                         f"med5={r.get('medianTop5Ratings') or 0:>7} title={r.get('exactTitleMatches', 0)} "
+                         f"ours={r.get('ourRank') or '-'}")
+        ranked = [r for r in targetable if r.get("ourRank")]
+        if ranked:
+            lines.append("  WE RANK: " + ", ".join(f"{r['term']} (#{r['ourRank']})" for r in ranked))
+        off = [r["term"] for r in rows if r.get("offCategory")]
+        if off:
+            lines.append("  OFF-CATEGORY (ignore): " + ", ".join(off[:8]))
+    return lines
