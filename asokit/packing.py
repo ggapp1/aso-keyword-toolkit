@@ -70,8 +70,8 @@ _LANGUAGE_FILLER = {
         "mein", "meine", "kostenlos", "einfach", "app",
     }),
     "es": frozenset({
-        "de", "la", "el", "los", "las", "un", "una", "y", "para", "con", "por",
-        "gratis", "tu", "mi",
+        "de", "del", "al", "la", "el", "los", "las", "un", "una", "y", "para",
+        "con", "por", "gratis", "tu", "mi",
     }),
     "pt": frozenset({
         "de", "da", "do", "das", "dos", "a", "o", "as", "os", "um", "uma", "e",
@@ -82,8 +82,9 @@ _LANGUAGE_FILLER = {
         "votre", "mon", "ma", "gratuit",
     }),
     "it": frozenset({
-        "di", "del", "della", "il", "lo", "la", "i", "gli", "le", "un", "una",
-        "e", "per", "con", "gratis", "tuo", "mio",
+        "di", "del", "dell", "della", "dello", "delle", "dei", "degli", "il",
+        "lo", "la", "i", "gli", "le", "un", "una", "e", "per", "con", "gratis",
+        "tuo", "mio",
     }),
     "nl": frozenset({
         "de", "het", "een", "en", "van", "voor", "met", "je", "jouw", "mijn",
@@ -184,6 +185,21 @@ def brand_words(candidates):
             continue
         from_terms.update(term.split())
     return frozenset(from_names - from_terms)
+
+
+def blocked_for(blocklist, locale):
+    """Words a blocklist file drops for `locale`.
+
+    The file is {"*": [...], "<locale or language>": [...]}: "*" applies everywhere,
+    "it" to every Italian locale, "fr-FR" to that locale only. Keys starting with
+    "_" are free-form notes and ignored.
+    """
+    words = set()
+    for key in ("*", (locale or "").split("-")[0], locale):
+        entries = blocklist.get(key) if key else None
+        if isinstance(entries, list):
+            words.update(str(word).strip().lower() for word in entries if str(word).strip())
+    return words
 
 
 def is_noise(word, brands, filler, blocked=frozenset(), locale=None):

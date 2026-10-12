@@ -222,3 +222,25 @@ class IncumbentTerms(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BlocklistFile(unittest.TestCase):
+    FILE = {"_comment": "notes are ignored", "*": ["Balloon"], "it": ["dell"],
+            "fr-FR": ["map"], "_notes": {"map": "rival fragment"}}
+
+    def test_star_applies_everywhere(self):
+        self.assertEqual(packing.blocked_for(self.FILE, "de-DE"), {"balloon"})
+
+    def test_language_key_covers_every_locale_of_that_language(self):
+        self.assertEqual(packing.blocked_for(self.FILE, "it"), {"balloon", "dell"})
+        self.assertEqual(packing.blocked_for(self.FILE, "it-IT"), {"balloon", "dell"})
+
+    def test_locale_key_is_exact(self):
+        self.assertEqual(packing.blocked_for(self.FILE, "fr-FR"), {"balloon", "map"})
+        self.assertEqual(packing.blocked_for(self.FILE, "fr-CA"), {"balloon"})
+
+
+class RomanceArticles(unittest.TestCase):
+    def test_spanish_and_italian_contracted_articles_are_filler(self):
+        self.assertIn("del", packing._LANGUAGE_FILLER["es"])
+        self.assertIn("dell", packing._LANGUAGE_FILLER["it"])

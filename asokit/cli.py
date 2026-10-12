@@ -566,12 +566,16 @@ def cmd_metadata_suggest(args):
     markets = list(config["markets"]) if args.all else [args.market]
 
     baseline = json.loads(Path(args.baseline).read_text()) if args.baseline else {}
-    blocked = {word.strip().lower() for word in (args.block or "").split(",") if word.strip()}
+    always_blocked = {word.strip().lower() for word in (args.block or "").split(",") if word.strip()}
+    blocklist = json.loads(Path(args.block_file).read_text()) if args.block_file else {}
+    if not isinstance(blocklist, dict):
+        sys.exit(f"{args.block_file}: expected an object like {{\"*\": [...], \"de-DE\": [...]}}")
     root = Path(args.dir or app.get("outputDir", "aso"))
 
     drafted = {}
     for market in markets:
         locale = _market_locale(config, market)
+        blocked = always_blocked | packing.blocked_for(blocklist, locale)
         scores_path = root / market / "scores.json"
         if not scores_path.exists():
             message = f"no scores at {scores_path} — run `asokit research --market {market}` first"
@@ -1580,6 +1584,10 @@ def build_parser():
     suggest_field.add_argument("--subtitle", help="override the subtitle used for deduplication")
     suggest_field.add_argument(
         "--block", help="comma-separated words to drop that no rule catches"
+    )
+    suggest_field.add_argument(
+        "--block-file",
+        help='JSON blocklist per locale: {"*": [...], "it": [...], "fr-FR": [...]}',
     )
     suggest_field.add_argument("--limit", type=int, default=meta.LIMITS["keywords"])
     suggest_field.add_argument("--dir", help="where research wrote its output")
