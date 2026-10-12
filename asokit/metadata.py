@@ -151,6 +151,57 @@ def _submission_problems(locale, fields, strict):
     return problems
 
 
+# Fields a localization needs before the version can be submitted, which a file that
+# only localizes name/subtitle/keywords tends to leave out.
+SUBMISSION_URLS = ("supportUrl", "privacyPolicyUrl")
+
+
+def missing_urls(metadata, live=None):
+    """{locale: [field, ...]} for URL fields a locale has neither in the file nor,
+    when `live` (the `pull` listing) is given, in App Store Connect.
+
+    App Store Connect creates a new localization with these empty — it does not
+    copy them from the primary locale — and an empty one blocks submission.
+    """
+    missing = {}
+    for locale, fields in sorted(metadata.items()):
+        if not isinstance(fields, dict):
+            continue
+        current = (live or {}).get(locale) or {}
+        absent = [url for url in SUBMISSION_URLS
+                  if not _filled(fields.get(url)) and not _filled(current.get(url))]
+        if absent:
+            missing[locale] = absent
+    return missing
+
+
+def _filled(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _same_text(a, b):
+    """App Store Connect normalises line endings and outer whitespace on save."""
+    clean = lambda text: (text or "").replace("\r\n", "\n").strip()
+    return clean(a) == clean(b)
+
+
+def diff(metadata, live):
+    """[(locale, field, live value or None, file value)] for every field in the file
+    that a push would change. Fields the file does not mention are never touched by
+    a push, so they are not compared."""
+    changes = []
+    for locale, fields in sorted(metadata.items()):
+        if not isinstance(fields, dict):
+            continue
+        current = live.get(locale) or {}
+        for field in sorted(fields):
+            if field not in KNOWN_FIELDS or not isinstance(fields[field], str):
+                continue
+            if not _same_text(current.get(field), fields[field]):
+                changes.append((locale, field, current.get(field), fields[field]))
+    return changes
+
+
 def check(metadata, strict=False, allow_partial=False):
     """Validate {locale: {field: value}}. Returns a list of problem strings.
 

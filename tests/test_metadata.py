@@ -245,3 +245,36 @@ class LocaleAwareStemming(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Diff(unittest.TestCase):
+    LIVE = {"en-US": {"name": "App", "subtitle": "Old line", "description": "One\r\nTwo\n",
+                      "supportUrl": "https://example.com/help"},
+            "de-DE": {"name": "App"}}
+
+    def test_reports_only_fields_the_file_sets_and_that_differ(self):
+        file = {"en-US": {"name": "App", "subtitle": "New line"}}
+        self.assertEqual(metadata.diff(file, self.LIVE), [("en-US", "subtitle", "Old line", "New line")])
+
+    def test_line_endings_and_outer_whitespace_are_not_differences(self):
+        self.assertEqual(metadata.diff({"en-US": {"description": "One\nTwo"}}, self.LIVE), [])
+
+    def test_field_never_set_live_and_new_locale_report_none_as_the_old_value(self):
+        file = {"de-DE": {"subtitle": "Neu"}, "fr-FR": {"name": "Appli"}}
+        self.assertEqual(metadata.diff(file, self.LIVE),
+                         [("de-DE", "subtitle", None, "Neu"), ("fr-FR", "name", None, "Appli")])
+
+    def test_unknown_fields_are_ignored(self):
+        self.assertEqual(metadata.diff({"en-US": {"ui": "en", "name": "App"}}, self.LIVE), [])
+
+
+class MissingUrls(unittest.TestCase):
+    def test_lists_urls_absent_from_the_file(self):
+        file = {"en-US": {"name": "App", "supportUrl": "https://x.test"}, "de-DE": {"name": "App"}}
+        self.assertEqual(metadata.missing_urls(file),
+                         {"de-DE": ["supportUrl", "privacyPolicyUrl"], "en-US": ["privacyPolicyUrl"]})
+
+    def test_a_url_already_live_is_not_missing(self):
+        live = {"de-DE": {"supportUrl": "https://x.test", "privacyPolicyUrl": " "}}
+        self.assertEqual(metadata.missing_urls({"de-DE": {"name": "App"}}, live),
+                         {"de-DE": ["privacyPolicyUrl"]})

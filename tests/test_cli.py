@@ -447,3 +447,13 @@ class CppCommands(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MetadataDiffLines(unittest.TestCase):
+    def test_short_value_is_shown_inline(self):
+        self.assertEqual(cli._diff_lines("subtitle", "Old", "New"), ["  subtitle: 'Old' → 'New'"])
+        self.assertEqual(cli._diff_lines("subtitle", None, "New"), ["  subtitle: (not set) → 'New'"])
+
+    def test_long_value_is_shown_as_changed_lines_only(self):
+        lines = cli._diff_lines("description", "Intro\r\nSame\nOld end", "Intro\nSame\nNew end")
+        self.assertEqual(lines, ["  description: 18 chars → 18 chars", "    -Old end", "    +New end"])

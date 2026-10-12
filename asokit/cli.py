@@ -27,6 +27,7 @@
 
 import argparse
 import csv
+import difflib
 import json
 import os
 import sys
@@ -437,6 +438,22 @@ def cmd_metadata_check(args):
         sys.exit(1)
     print("\nAll fields within limits. No repetition across name, subtitle and keywords.")
     _print_stemming_note(data)
+    _print_url_note(data)
+
+
+def _print_url_note(data):
+    """A locale without support/privacy URLs in the file is fine if they are already
+    live, so this is a note, not a problem; `metadata diff` checks against live."""
+    missing = meta.missing_urls(data)
+    if not missing:
+        return
+    locales = sorted(missing)
+    shown = ", ".join(locales[:8]) + (f" +{len(locales) - 8} more" if len(locales) > 8 else "")
+    print(
+        f"\nnote: no supportUrl / privacyPolicyUrl in the file for {shown}. App Store Connect "
+        "creates new localizations with these empty, and an empty one blocks submission — "
+        "`asokit metadata diff` shows which locales lack them live."
+    )
 
 
 def _print_stemming_note(data):
@@ -655,6 +672,58 @@ def cmd_metadata_pull(args):
         print(f"{args.out} — {len(listing)} locale(s), {fields} field(s)", file=sys.stderr)
     else:
         print(rendered)
+
+
+def _diff_lines(field, old, new):
+    """One changed field as indented text: short values inline, long ones as a line diff."""
+    if old is None:
+        old_text = ""
+    else:
+        old_text = old.replace("\r\n", "\n")
+    if "\n" not in old_text and "\n" not in new and len(old_text) <= 100 and len(new) <= 100:
+        before = "(not set)" if old is None else repr(old_text)
+        return [f"  {field}: {before} → {new!r}"]
+    lines = [f"  {field}: {'(not set)' if old is None else str(len(old_text)) + ' chars'} → {len(new)} chars"]
+    for line in difflib.unified_diff(old_text.splitlines(), new.splitlines(), lineterm="", n=0):
+        if line.startswith(("---", "+++", "@@")):
+            continue
+        lines.append(f"    {line}")
+    return lines
+
+
+def cmd_metadata_diff(args):
+    """Field by field, what a push of FILE would change in the live listing. Read-only."""
+    config = load_config(args.config) if Path(args.config).exists() else {}
+    app_id = _app_id(args, config)
+    if not app_id:
+        sys.exit("need an appId — pass --app-id or set app.appId in the config")
+    data = json.loads(Path(args.file).read_text())
+    if args.locales:
+        wanted = set(args.locales.split(","))
+        data = {locale: fields for locale, fields in data.items() if locale in wanted}
+    live = asc.pull(app_id, asc.token())
+    changes = meta.diff(data, live)
+    urls = meta.missing_urls(data, live)
+    if args.json:
+        print(json.dumps({"changes": [{"locale": l, "field": f, "live": o, "file": n} for l, f, o, n in changes],
+                          "newLocales": sorted(set(data) - set(live)), "missingUrls": urls},
+                         indent=2, ensure_ascii=False))
+        return
+    by_locale = {}
+    for locale, field, old, new in changes:
+        by_locale.setdefault(locale, []).append((field, old, new))
+    for locale, rows in by_locale.items():
+        print(f"{locale}{'  (not in App Store Connect yet)' if locale not in live else ''}")
+        for field, old, new in rows:
+            for line in _diff_lines(field, old, new):
+                print(line)
+    if not changes:
+        print("no differences — the file matches the live listing for every field it sets.")
+    else:
+        print(f"\n{len(changes)} field(s) differ across {len(by_locale)} locale(s).")
+    for locale, fields in urls.items():
+        print(f"note: {locale} has no {' or '.join(fields)} in the file or in App Store Connect — "
+              "an empty one blocks submission.")
 
 
 def _locale_rows(label, localizations):
@@ -1526,6 +1595,15 @@ def build_parser():
     pull.add_argument("--app-id")
     pull.add_argument("--out", help="write here instead of stdout")
     pull.set_defaults(func=cmd_metadata_pull)
+
+    diff = metadata_sub.add_parser(
+        "diff", help="field by field, what a push of FILE would change (read-only)"
+    )
+    diff.add_argument("file")
+    diff.add_argument("--app-id")
+    diff.add_argument("--locales", help="comma-separated subset of the file's locales")
+    diff.add_argument("--json", action="store_true")
+    diff.set_defaults(func=cmd_metadata_diff)
 
     push = metadata_sub.add_parser("push", help="sync metadata (dry run unless --apply)")
     push.add_argument("file")
