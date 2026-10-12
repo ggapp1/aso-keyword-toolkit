@@ -425,17 +425,11 @@ def plan(desired, inventory):
                 )
             )
 
-            price = subscription.get("price")
-            if price:
-                actions.append(
-                    {
-                        "kind": "setPrices",
-                        "productId": product_id,
-                        "baseTerritory": price["baseTerritory"],
-                        "customerPrice": price["customerPrice"],
-                    }
-                )
-
+            # Availability first, then prices. App Store Connect answers a price
+            # POST for a territory the subscription is not sold in with a 409
+            # ("An error occurred while processing the pricing information"), so
+            # on a brand-new subscription the old prices-first order died on the
+            # first price write and never reached the step that unblocks it.
             availability = subscription.get("availability")
             if availability:
                 # Compare the field, not the dict. Whole-dict equality made any
@@ -454,6 +448,17 @@ def plan(desired, inventory):
                             "allTerritories": desired_everywhere,
                         }
                     )
+
+            price = subscription.get("price")
+            if price:
+                actions.append(
+                    {
+                        "kind": "setPrices",
+                        "productId": product_id,
+                        "baseTerritory": price["baseTerritory"],
+                        "customerPrice": price["customerPrice"],
+                    }
+                )
 
     return actions
 

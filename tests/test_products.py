@@ -298,6 +298,14 @@ class PlanFromEmpty(unittest.TestCase):
             kinds(actions).index("setPrices"),
         )
 
+    def test_availability_is_set_before_prices(self):
+        # A price POST for a territory the subscription is not yet sold in is a 409.
+        actions = products.plan(declarative(), EMPTY_INVENTORY)
+        self.assertLess(
+            kinds(actions).index("setAvailability"),
+            kinds(actions).index("setPrices"),
+        )
+
 
 class PlanIdempotence(unittest.TestCase):
     def test_fully_provisioned_inventory_writes_nothing(self):

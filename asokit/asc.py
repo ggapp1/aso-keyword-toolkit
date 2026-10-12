@@ -1006,8 +1006,8 @@ def apply_products(app_id, desired, bearer, apply=False):
             # `availableTerritories` is REQUIRED by App Store Connect on this
             # POST (Apple's own schema marks the relationship, and its `data`,
             # required). Sending only the attribute is rejected — which would
-            # abort at the LAST write of every subscription, leaving each one
-            # fully created and priced but never put on sale.
+            # abort every new subscription before it is put on sale or priced
+            # (availability is planned ahead of prices).
             #
             # The file cannot express a territory subset, so the list written is
             # always every territory; `allTerritories` drives the future-enrol
