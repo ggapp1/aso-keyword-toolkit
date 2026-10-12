@@ -30,7 +30,7 @@ DEFAULT_TYPE = {
     "tight": {"verb": 260, "descriptor": 170},
 }
 HEADER_CANVAS = (3840, 1646)
-HEADER_ZONE = (800, 380, 3040, 1150)        # x0, y0, x1, y1: the headline shows here on every device
+HEADER_ZONE = (940, 380, 2900, 1150)        # x0, y0, x1, y1: inside the iPhone crop (≈ x 902–2938), shown on every device
 HEADER_BAND = (677, 3163)                   # x range devices (and their shadows) stay out of
 HEADER_DEVICE_TOP = 200                     # devices start at or below this y; they may bleed off the bottom
 HEADER_MIN_DEVICE = 0.4                     # skip devices smaller than this fraction of the canvas height
@@ -376,7 +376,7 @@ def _compose(cfg, variant, locale, head, captures):
 
 
 def header_settings(cfg):
-    """The resolved `"header"` block: None when disabled, else canvas, zone, band, device top and type."""
+    """The resolved `"header"` block: None when disabled, else canvas, zone, band, device top, min device and type."""
     block = cfg.get("header") or {}
     if block.get("enabled", True) is False:
         return None
@@ -384,6 +384,7 @@ def header_settings(cfg):
     return {"canvas": canvas, "zone": tuple(block.get("zone") or HEADER_ZONE),
             "band": tuple(block.get("centreBand") or HEADER_BAND),
             "device_top": block.get("deviceTop", HEADER_DEVICE_TOP),
+            "min_device": block.get("minDevice", HEADER_MIN_DEVICE),
             "type": _types(DEFAULT_HEADER_TYPE, block.get("type", {}))}
 
 
@@ -420,7 +421,7 @@ def _compose_header(cfg, settings, locale, head, captures):
     top_limit = settings["device_top"]
     frame_h = _header_device_height(sides, side_w, canvas[1] - top_limit) if side_w > 0 else None
     devices = 0
-    if frame_h is not None and frame_h >= canvas[1] * HEADER_MIN_DEVICE:
+    if frame_h is not None and frame_h >= canvas[1] * settings["min_device"]:
         frames = [_device(shot, frame_h, frame_colour, Image, ImageDraw) for shot in sides]
         top = max(top_limit, round((zy0 + zy1) / 2 - frame_h / 2))
         positions = [(0, round((band_x0 - frames[0].width) / 2), top),

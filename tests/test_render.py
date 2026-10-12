@@ -25,7 +25,7 @@ def write_config(root, variants, rtl=None):
            "type": {"verb": {"size": 300, "min": 120, "step": 10, "lines": 1, "leading": 1.02},
                     "descriptor": {"size": 160, "min": 80, "step": 6, "lines": 2, "leading": 1.12},
                     "tight": {"verb": 150, "descriptor": 90}},
-           "rtl": rtl or [], "variants": variants}
+           "rtl": rtl or [], "variants": variants, "header": {"enabled": False}}
     path = Path(root) / "assets.json"
     path.write_text(json.dumps(cfg))
     return render.load_config(path)
@@ -146,7 +146,7 @@ class RenderTests(unittest.TestCase):
                 render.render_variant(cfg, "v", Path(tmp) / "out", locales=["de-DE"])
 
 
-HEADER_ZONE = (800, 380, 3040, 1150)
+HEADER_ZONE = (940, 380, 2900, 1150)
 CENTRE_BAND = (677, 3163)
 
 
@@ -176,8 +176,7 @@ def _colour_centre_x(path, colour):
 class HeaderRenderTests(unittest.TestCase):
     def render(self, tmp, heads, captures=("{ui}/one.png", "{ui}/two.png"), header=None, rtl=None, **kwargs):
         cfg = write_config(tmp, {"v": variant(heads, captures=captures)}, rtl=rtl)
-        if header is not None:
-            cfg["header"] = header
+        cfg["header"] = header if header is not None else {}
         return cfg, render.render_variant(cfg, "v", Path(tmp) / "out", **kwargs)
 
     def test_header_file_size_mode_text_zone_and_clear_centre_band(self):
@@ -219,6 +218,14 @@ class HeaderRenderTests(unittest.TestCase):
             image = Image.open(Path(tmp) / "out" / "v" / "header" / "en-US.png")
             self.assertIsNone(_darker_than_background_bbox(image))
             self.assertEqual(result["report"][0]["header"]["devices"], 0)
+
+    def test_device_below_min_device_is_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, result = self.render(tmp, {"en-US": ["LOG", "Patterns"]}, header={"minDevice": 0.9})
+            self.assertEqual(result["failed"], {})
+            self.assertEqual(result["report"][0]["header"]["devices"], 0)
+            image = Image.open(Path(tmp) / "out" / "v" / "header" / "en-US.png")
+            self.assertIsNone(_darker_than_background_bbox(image))
 
     def test_default_header_type_fits_realistic_headlines(self):
         with tempfile.TemporaryDirectory() as tmp:

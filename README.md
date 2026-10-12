@@ -540,8 +540,8 @@ header crops it hard — iPhone keeps only the centre ~53% of the width, iPad th
 full width but only the top ~55% of the height, iPhone Duo the centre ~65% —
 and the status bar, Dynamic Island, back/share buttons and iPad tab bar cover
 the top band and corners. A left-aligned headline gets cut on iPhone. The
-header file centres the headline in a zone every device shows (x 800–3040,
-y 380–1150) and puts one phone at each far side, fully outside the centre band
+header file centres the headline in a zone every device shows (x 940–2900,
+y 380–1150 — inside the iPhone crop, about x 902–2938, with a margin) and puts one phone at each far side, fully outside the centre band
 (x 677–3163), so the iPhone crop shows a clean headline. Search keeps the
 universal file. `assets.json` lives next to `asokit.json` by default (`--assets PATH`
 points elsewhere):
@@ -562,7 +562,7 @@ points elsewhere):
            "descriptor": {"size": 220, "min": 150, "step": 6, "lines": 2, "leading": 1.12},
            "tight": {"verb": 260, "descriptor": 170}},
   "header": {"enabled": true, "canvas": {"width": 3840, "height": 1646},
-             "zone": [800, 380, 3040, 1150], "centreBand": [677, 3163], "deviceTop": 200,
+             "zone": [940, 380, 2900, 1150], "centreBand": [677, 3163], "deviceTop": 200, "minDevice": 0.4,
              "type": {"verb": {"size": 260, "min": 150, "step": 10, "lines": 1, "leading": 1.02},
                       "descriptor": {"size": 130, "min": 80, "step": 6, "lines": 1, "leading": 1.12},
                       "tight": {"verb": 190, "descriptor": 100}}},
@@ -591,12 +591,17 @@ merges the same way (the top-level `type` applies only to the universal file).
 The header uses the same brand colours, fonts, headline sources and lint as
 the universal file. Its headline is centred in `zone` — verb on one line,
 descriptor on one line. Each phone is centred in the space outside
-`centreBand`, at or below `deviceTop`, and may run off the bottom edge. The
+`centreBand`, at or below `deviceTop`, and may run off the bottom edge.
+Phones shorter than `minDevice` × the canvas height are dropped rather than
+drawn too small to read. The
 left phone shows the first capture and the right phone the second, or the
 first again when there is only one; RTL locales swap them. When a side is too
 narrow for a legible phone, the header has no phones and the report says
 `header-no-devices` — phones and their shadows never enter the band.
-`"header": {"enabled": false}` renders the universal file only (and removes a
+`canvas` must stay **3840 × 1646** for anything you upload: `assets push`
+and `cpp check`/`cpp push` reject a header file of any other size (that is the
+size Apple's catalog accepts for the header placement). Change it only for
+experiments. `"header": {"enabled": false}` renders the universal file only (and removes a
 header file left over from an earlier render, so it can't be placed by
 mistake).
 
