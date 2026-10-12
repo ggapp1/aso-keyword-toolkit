@@ -43,6 +43,20 @@ class SubmitTests(unittest.TestCase):
         self.assertEqual(self.fake.submissions["s0"]["state"], "WAITING_FOR_REVIEW")
 
 
+class IncludeTests(unittest.TestCase):
+    def test_items_query_never_includes_both_experiment_versions(self):
+        self.assertIn("appStoreVersionExperimentV2", review.INCLUDE)
+        self.assertNotIn("appStoreVersionExperiment", review.INCLUDE)
+
+    def test_draft_with_legacy_experiment_item_fails_closed(self):
+        fake = install(self, FakeConnect())
+        fake.submissions["s0"] = {"state": "READY_FOR_REVIEW",
+                                  "items": [("appStoreVersionExperiment", "appStoreVersionExperiments", "x1")]}
+        with self.assertRaises(review.SubmissionBlocked):
+            review.submit("1", [CPP_ITEM], "t", apply=True)
+        self.assertEqual(fake.submissions["s0"]["state"], "READY_FOR_REVIEW")
+
+
 class PreflightTests(unittest.TestCase):
     def setUp(self):
         self.fake = install(self, FakeConnect())

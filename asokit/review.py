@@ -13,6 +13,11 @@ IN_FLIGHT = frozenset({"WAITING_FOR_REVIEW", "IN_REVIEW", "UNRESOLVED_ISSUES"})
 ITEM_RELATIONSHIPS = ("appStoreVersion", "appCustomProductPageVersion", "appAssetLibraryImage", "appAssetLibraryVideo",
                       "appEvent", "appStoreVersionExperiment", "appStoreVersionExperimentV2", "inAppPurchaseVersion",
                       "subscriptionVersion", "subscriptionGroupVersion", "backgroundAssetVersion")
+# Apple rejects including appStoreVersionExperiment and appStoreVersionExperimentV2
+# together ("reference different versions of the same type"). Include only V2; an
+# item carrying the legacy V1 relationship then has no linkage data, reads as
+# "unknown", and is treated as foreign — the guard still fails closed.
+INCLUDE = tuple(name for name in ITEM_RELATIONSHIPS if name != "appStoreVersionExperiment")
 
 
 class SubmissionBlocked(asc.ASCError):
@@ -20,7 +25,7 @@ class SubmissionBlocked(asc.ASCError):
 
 
 def _items(submission_id, bearer):
-    include = ",".join(ITEM_RELATIONSHIPS)
+    include = ",".join(INCLUDE)
     rows = asc.call_all("GET", f"/reviewSubmissions/{submission_id}/items?include={include}&limit=200", bearer)
     found = []
     for row in rows:

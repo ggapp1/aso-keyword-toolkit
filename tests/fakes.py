@@ -154,6 +154,10 @@ class FakeConnect:
             self.submissions[sid]["items"].append((rel, value["data"]["type"], value["data"]["id"]))
             return {"data": {"id": self.next_id("item")}}
         if method == "GET" and len(parts) == 3 and parts[0] == "reviewSubmissions" and parts[2] == "items":
+            included = set(query.get("include", "").split(","))
+            if {"appStoreVersionExperiment", "appStoreVersionExperimentV2"} <= included:
+                # Apple: "cannot include appStoreVersionExperiment and appStoreVersionExperimentV2 at the same time"
+                raise asc.ASCError("App Store Connect returned 400: include has both experiment versions")
             return {"data": [{"id": f"i{n}", "type": "reviewSubmissionItems",
                               "relationships": {rel: {"data": {"type": rtype, "id": rid}}}}
                              for n, (rel, rtype, rid) in enumerate(self.submissions[parts[1]]["items"])]}
