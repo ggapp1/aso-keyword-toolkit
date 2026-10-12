@@ -3,15 +3,19 @@
   asokit init                          write a starter config
   asokit storefronts [--check cc]      list / verify storefronts
   asokit research --market de          expand + score, write a report
+  asokit digest                        every researched market in one summary
   asokit metadata suggest --market de  pack research into a keyword field
   asokit metadata pull                 capture the live listing as JSON
   asokit metadata check <file>         validate limits and duplication
+  asokit metadata diff <file>          what a push would change, field by field (read-only)
   asokit metadata status               what App Store Connect will accept
   asokit metadata push <file> [--apply]  sync (dry run unless --apply)
   asokit products status               list IAPs/subscriptions and their locales
   asokit products check <file>         validate product text limits
   asokit products push <file> [--apply]  sync product text (dry run unless --apply)
   asokit products apply <file> [--apply]  provision products, prices, availability
+  asokit screenshots status            screenshot sets per locale on the editable version
+  asokit screenshots push DIR [--apply]   replace sets from DIR/<locale>/*.png
   asokit assets render [--variant V]   render search (universal) + header creatives from assets.json
   asokit assets status [--catalog]     library, asset states, placements
   asokit assets push DIR --target default [--apply]   place creatives

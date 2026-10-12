@@ -301,6 +301,11 @@ cannot be submitted. Nothing surfaces that until submission fails. Use
 locale whose description is already live, and `--strict` to also require
 release notes.
 
+The same is true of the support and privacy-policy URLs: a new localization
+starts with both empty, and an empty one blocks submission. `check` cannot
+know what is already live, so it prints a note naming the locales whose file
+entry has neither; `asokit metadata diff` checks them against the live listing.
+
 This command needs no credentials, so it doubles as clean copy-paste output if
 you'd rather paste into the web UI.
 
@@ -496,6 +501,11 @@ what differs, so a second run against an unchanged file writes nothing —
 including the 175 price rows. That is the property that makes it safe to re-run
 after a partial failure.
 
+A new subscription is put on sale before it is priced. App Store Connect
+rejects a price for a territory the subscription is not sold in (a 409,
+"An error occurred while processing the pricing information"), so availability
+is always written first.
+
 Three things it will not do, each on purpose:
 
 - **Change what cannot be changed.** `productId` and `subscriptionPeriod` are
@@ -652,11 +662,19 @@ and `header-no-devices`.
 
 **A locale that can't be rendered properly fails on its own.** If its text
 won't fit the safe box (or the header zone) at the minimum size and line count,
-or its headline fails the lint, that locale is reported, and its old universal
-and header files are both deleted (so a stale image can't be uploaded by
-mistake). The other locales still render.
+its headline fails the lint, or its font has no glyph for a character in the
+headline, that locale is reported, and its old universal and header files are
+both deleted (so a stale image can't be uploaded by mistake). The other locales
+still render.
+
+The glyph check exists because Pillow draws a font's placeholder box for a
+missing character and reports success. It is easy to hit: SF Hebrew and SF
+Arabic have no Latin comma, so `"הרגל, יום אחר יום"` renders with a striped
+block where the comma should be. Reword the headline, or point
+`fonts.<locale>` at a font that covers it.
 The lint catches what App Review rejects on creatives: prices and offers,
-URLs, rank and award claims, other platforms, medical claims. Languages
+URLs, rank and award claims, other platforms, medical claims — including
+third-person ones such as "detects", "predicts", "diagnoses", "cures". Languages
 without a word list get a warning, which `--strict-lint` turns into an error;
 `--no-lint` skips it. Right-to-left locales need Pillow built with libraqm;
 without it, a variant with any RTL locale in scope stops before drawing
@@ -853,6 +871,26 @@ drafts that differ are updated, submitted ones are left alone. If two
 nominations in App Store Connect already share a name, `push` refuses rather
 than guess which one you meant. `--submit --name N` submits exactly that one,
 after every draft in the file has been written.
+
+### Screenshots
+
+`screenshots push DIR` replaces the screenshot sets of the editable version
+from `DIR/<locale>/*.png`, files in name order:
+
+```bash
+asokit screenshots status                       # sets per locale on the editable version
+asokit screenshots push out/                    # dry run: what would be deleted and uploaded
+asokit screenshots push out/ --locales he,ar-SA --apply
+asokit screenshots push out/ --mirror APP_IPAD_PRO_3GEN_129 --mirror-from en-US --apply
+```
+
+Pixel sizes and the ten-per-set limit are checked before anything is sent, and
+an applied run waits until Apple has processed every upload. `--display` names
+the display family of the PNGs (default `APP_IPHONE_67`); `--mirror` copies
+other families, such as the iPad set, from one locale into all the others.
+Only subfolders named like a locale (`de`, `en-US`, `zh-Hans`) are read —
+anything else in `DIR`, such as `ipad-en-US` or a contact-sheet folder, is
+skipped and listed.
 
 ### Screenshots through the Asset Library
 

@@ -109,6 +109,7 @@ have access. Worth it when two candidates are genuinely tied.
 
 ```bash
 asokit metadata status                  # is a version editable?
+asokit metadata diff de.json            # field by field, what the push would change
 asokit metadata push de.json            # dry run
 asokit metadata push de.json --apply
 ```
