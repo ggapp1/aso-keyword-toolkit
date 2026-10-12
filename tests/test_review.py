@@ -31,7 +31,9 @@ class SubmitTests(unittest.TestCase):
         self.fake.submissions["s0"] = {"state": "READY_FOR_REVIEW", "items": [("appStoreVersion", "appStoreVersions", "v1")]}
         with self.assertRaises(review.SubmissionBlocked) as caught:
             review.submit("1", [CPP_ITEM], "t", apply=True)
-        self.assertIn("appStoreVersion", str(caught.exception))
+        self.assertIn("appStoreVersion v1", str(caught.exception))
+        self.assertIn("nothing was submitted", str(caught.exception))
+        self.assertIn("added to a later submission by hand", str(caught.exception))
         self.assertEqual(self.fake.submissions["s0"]["state"], "READY_FOR_REVIEW")
 
     def test_clean_draft_is_reused(self):

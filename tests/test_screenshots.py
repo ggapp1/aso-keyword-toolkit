@@ -24,6 +24,17 @@ class Planner(unittest.TestCase):
             self.assertEqual([p.name for p in plan["de-DE"]["APP_IPHONE_67"]], ["01-a.png", "02-b.png"])
             self.assertEqual(shots.check(plan), [])
 
+    def test_folders_that_are_not_locale_codes_are_left_out(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("en-US", "zh-Hans", "no", "ipad-en-US", "_contact"):
+                (Path(tmp) / name).mkdir()
+                png(Path(tmp) / name / "01.png", 2064 if name.startswith("ipad") else 1290,
+                    2752 if name.startswith("ipad") else 2796)
+            plan = shots.plan_from_directory(tmp, "APP_IPHONE_67")
+            self.assertEqual(sorted(plan), ["en-US", "no", "zh-Hans"])
+            self.assertEqual(shots.check(plan), [])
+            self.assertEqual(shots.non_locale_folders(tmp), ["_contact", "ipad-en-US"])
+
     def test_rejects_wrong_size_and_too_many(self):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "fr-FR").mkdir()

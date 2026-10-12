@@ -114,9 +114,27 @@ class RenderTests(unittest.TestCase):
     @unittest.skipUnless(HAVE_RAQM, "Pillow without libraqm")
     def test_rtl_mirrors_layout(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cfg = write_config(tmp, {"v": variant({"he": ["שלום", "דפוסים"]})}, rtl=["he"])
+            cfg = write_config(tmp, {"v": variant({"he": ["SHALOM", "Patterns"]})}, rtl=["he"])
             render.render_variant(cfg, "v", Path(tmp) / "out", lint=False)
             self.assertLess(_red_centre_x(Path(tmp) / "out" / "v" / "he.png"), 5244 / 2)
+
+    def test_character_the_font_lacks_fails_only_that_locale(self):
+        # Pillow would draw the font's placeholder box and report success.
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = write_config(tmp, {"v": variant({"en-US": ["LOG", "Patterns"],
+                                                   "he": ["LOG", "דפוסים, Patterns"]})})
+            result = render.render_variant(cfg, "v", Path(tmp) / "out", lint=False)
+            self.assertIn("no glyph for", result["failed"]["he"])
+            self.assertIn("'ד'", result["failed"]["he"])
+            self.assertNotIn("','", result["failed"]["he"])
+            self.assertTrue((Path(tmp) / "out" / "v" / "en-US.png").exists())
+            self.assertFalse((Path(tmp) / "out" / "v" / "he.png").exists())
+
+    def test_spaces_and_zero_width_breaks_are_not_missing_glyphs(self):
+        from PIL import ImageFont
+        font = ImageFont.load_default(80)
+        self.assertEqual(render._missing_glyphs(font, "LOG \u200bMOOD\u00a0NOW"), [])
+        self.assertEqual(render._missing_glyphs(font, "LOG ד MOOD ד"), ["ד"])
 
     def test_overlong_headline_fails_only_that_locale(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -231,7 +249,7 @@ class HeaderRenderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             heads = {"en-US": ["LOG MOOD SWINGS", "TRIGGERS, SYMPTOMS & PATTERNS"],
                      "en-GB": ["SEE THE PATTERNS", "MOOD, SLEEP & MEDS IN ONE PLACE"],
-                     "de-DE": ["STIMMUNG ERFASSEN", "AUSLÖSER, SYMPTOME & MUSTER"]}
+                     "de-DE": ["STIMMUNG ERFASSEN", "SCHLAF, SYMPTOME & MUSTER"]}
             _, result = self.render(tmp, heads)
             self.assertEqual(result["failed"], {})
             self.assertEqual(len(result["header_written"]), 3)
@@ -280,7 +298,7 @@ class HeaderRenderTests(unittest.TestCase):
     @unittest.skipUnless(HAVE_RAQM, "Pillow without libraqm")
     def test_rtl_header_renders_centred(self):
         with tempfile.TemporaryDirectory() as tmp:
-            _, result = self.render(tmp, {"he": ["שלום", "דפוסים"]}, rtl=["he"], lint=False)
+            _, result = self.render(tmp, {"he": ["SHALOM", "Patterns"]}, rtl=["he"], lint=False)
             self.assertEqual(result["failed"], {})
             image = Image.open(Path(tmp) / "out" / "v" / "header" / "he.png")
             self.assertEqual(image.size, (3840, 1646))

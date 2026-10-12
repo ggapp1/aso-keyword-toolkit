@@ -50,6 +50,14 @@ def _open_drafts(app_id, bearer):
     return [r for r in open_rows if (r.get("attributes") or {}).get("state") == "READY_FOR_REVIEW"]
 
 
+def _foreign_items_message(submission, foreign):
+    listed = ", ".join(f"{rel} {rid}" for rel, _, rid in foreign)
+    return (f"draft submission {submission} already holds other items ({listed}); submitting now would "
+            "send them to App Review too, so nothing was submitted. In App Store Connect open the app's "
+            "draft submission and either submit it or remove those items, then re-run. Removed items go "
+            "back to Ready to Submit and have to be added to a later submission by hand.")
+
+
 def preflight(app_id, bearer, allowed_relationships):
     """Read-only early guard, run before any upload.
 
@@ -65,9 +73,7 @@ def preflight(app_id, bearer, allowed_relationships):
     allowed = set(allowed_relationships)
     foreign = [i for i in _items(submission, bearer) if i[0] not in allowed]
     if foreign:
-        listed = ", ".join(f"{rel} {rid}" for rel, _, rid in foreign)
-        raise SubmissionBlocked(f"draft submission {submission} already holds other items ({listed}). "
-                                "Submit or clear it in App Store Connect first — asokit will not submit them for you.")
+        raise SubmissionBlocked(_foreign_items_message(submission, foreign))
     return submission
 
 
@@ -82,9 +88,7 @@ def submit(app_id, items, bearer, apply, ledger=None, command=""):
         existing = _items(submission, bearer)
         foreign = [i for i in existing if i not in planned]
         if foreign:
-            listed = ", ".join(f"{rel} {rid}" for rel, _, rid in foreign)
-            raise SubmissionBlocked(f"draft submission {submission} already holds other items ({listed}). "
-                                    "Submit or clear it in App Store Connect first — asokit will not submit them for you.")
+            raise SubmissionBlocked(_foreign_items_message(submission, foreign))
     add = [i for i in planned if i not in existing]
     result = {"submission": submission or "(new)", "add": add, "existing": existing, "submitted": False}
     if not apply:

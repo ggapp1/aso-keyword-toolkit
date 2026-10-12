@@ -18,6 +18,7 @@ portrait compositor (`screenshots/store/compose.py`) and parameterised.
 import json
 import math
 import re
+import unicodedata
 from pathlib import Path
 
 from . import creative
@@ -165,6 +166,26 @@ def _font(cfg, locale, size, ImageFont):
     return font
 
 
+def _missing_glyphs(font, text):
+    """Characters `font` has no glyph for. Pillow draws the font's placeholder box for
+    them without any warning (SF Hebrew and SF Arabic, for one, have no Latin comma)."""
+    try:
+        placeholder = font.getmask("\U0010FFFF")       # never assigned: always the placeholder
+    except Exception:
+        return []
+    if placeholder.getbbox() is None:                  # an empty placeholder cannot be told apart
+        return []
+    reference = (placeholder.size, bytes(placeholder))
+    missing = []
+    for char in dict.fromkeys(text):
+        if char.isspace() or unicodedata.category(char) in ("Cf", "Cc") or "\ufe00" <= char <= "\ufe0f":
+            continue                                   # spaces, joiners, variation selectors draw nothing
+        mask = font.getmask(char)
+        if (mask.size, bytes(mask)) == reference:
+            missing.append(char)
+    return missing
+
+
 def _width(draw, text, font, rtl):
     kwargs = {"direction": "rtl"} if rtl else {}
     left, _, right, _ = draw.textbbox((0, 0), text, font=font, **kwargs)
@@ -224,6 +245,10 @@ def _wrap(draw, text, font, max_w, rtl, per_char, max_lines):
 def _fit(cfg, draw, locale, text, max_w, spec, rtl, ImageFont):
     per_char = locale in set(cfg.get("noSpaceWrap", ["ja", "zh-Hans", "zh-Hant"]))
     size = spec["size"]
+    missing = _missing_glyphs(_font(cfg, locale, size, ImageFont), text)
+    if missing:
+        raise RenderError(f"the font for {locale} has no glyph for {' '.join(repr(c) for c in missing)} in '{text}' "
+                          f"— reword the headline or set a font that covers it under fonts.{locale}")
     while size >= spec["min"]:
         font = _font(cfg, locale, size, ImageFont)
         lines = _wrap(draw, text, font, max_w, rtl, per_char, spec["lines"])

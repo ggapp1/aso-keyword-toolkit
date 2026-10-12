@@ -4,6 +4,7 @@ Layout: DIR/<asc-locale>/*.png, sorted by file name = store order. Only PNG
 dimensions are checked here (read from the IHDR chunk, no imaging library);
 App Store Connect validates everything else at upload time.
 """
+import re
 import struct
 from pathlib import Path
 
@@ -44,13 +45,27 @@ def png_size(path):
     return struct.unpack(">II", head[16:24])
 
 
-def plan_from_directory(directory, display_type):
-    """{locale: [Path, ...]} for every locale folder, files in name order."""
+# An App Store Connect locale code: "de", "en-US", "zh-Hans". Folders named anything
+# else ("ipad-en-US", "_contact") hold other material and are not locales.
+LOCALE_FOLDER = re.compile(r"^[a-z]{2,3}(-[A-Z][A-Za-z]{1,3})?$")
+
+
+def _folders(directory):
     root = Path(directory)
     if not root.is_dir():
         raise ValueError(f"{directory}: not a directory")
+    return sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
+
+
+def non_locale_folders(directory):
+    """Names of subfolders plan_from_directory leaves out because they are not locale codes."""
+    return [p.name for p in _folders(directory) if not LOCALE_FOLDER.match(p.name)]
+
+
+def plan_from_directory(directory, display_type):
+    """{locale: [Path, ...]} for every locale folder, files in name order."""
     plan = {}
-    for folder in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")):
+    for folder in (p for p in _folders(directory) if LOCALE_FOLDER.match(p.name)):
         files = sorted(p for p in folder.iterdir() if p.suffix.lower() == ".png")
         if files:
             plan[folder.name] = files

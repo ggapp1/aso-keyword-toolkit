@@ -905,6 +905,9 @@ def cmd_screenshots_push(args):
     if not app_id:
         sys.exit("need an appId — pass --app-id or set app.appId in the config")
     plan = shots.plan_from_directory(args.directory, args.display)
+    skipped = shots.non_locale_folders(args.directory)
+    if skipped:
+        print(f"skipped (not a locale folder): {', '.join(skipped)}")
     if args.locales:
         wanted = set(args.locales.split(","))
         plan = {k: v for k, v in plan.items() if k in wanted}
