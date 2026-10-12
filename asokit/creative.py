@@ -1,8 +1,11 @@
-"""Universal creative files (product page header + search results).
+"""Creative files: the universal asset (search results, and the header when no
+dedicated header file exists) and the dedicated product-page header.
 
-Layout: DIR/<asc-locale>.png — the shape `asokit assets render` writes. Names
-starting with `_` or `.` are ignored (render writes contact sheets to
-`_contact/`). PNG facts are read from the chunk headers, no imaging library.
+Layout: DIR/<asc-locale>.png (universal, 5244×2950) and optionally
+DIR/header/<asc-locale>.png (header, 3840×1646) — the shape `asokit assets
+render` writes. Names starting with `_` or `.` are ignored (render writes
+contact sheets to `_contact/`); subdirectories are never listed as universal
+files. PNG facts are read from the chunk headers, no imaging library.
 """
 import json
 import re
@@ -12,6 +15,8 @@ from importlib import resources
 from pathlib import Path
 
 UNIVERSAL = (5244, 2950)
+HEADER = (3840, 1646)
+HEADER_DIR = "header"
 SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
@@ -24,6 +29,12 @@ def plan_from_directory(directory):
         for path in sorted(root.iterdir())
         if path.is_file() and path.suffix.lower() == ".png" and not path.name.startswith(("_", "."))
     }
+
+
+def header_plan_from_directory(directory):
+    """{locale: Path} of DIR/header/<locale>.png; {} when there is no header directory."""
+    header = Path(directory) / HEADER_DIR
+    return plan_from_directory(header) if header.is_dir() else {}
 
 
 def png_info(source):

@@ -96,6 +96,11 @@ def creative_path(doc, creative_root, variant, locale):
     return Path(doc["_root"]) / creative_root / variant / f"{locale}.png"
 
 
+def header_path(doc, creative_root, variant, locale):
+    """The dedicated header file for a creative; it may not exist (the universal file then serves the header too)."""
+    return Path(doc["_root"]) / creative_root / variant / creative.HEADER_DIR / f"{locale}.png"
+
+
 def _protected(doc, locale):
     table = doc.get("protectedKeywords", {})
     return {norm(k) for k in table.get("*", []) + table.get(locale, [])}
@@ -161,6 +166,9 @@ def check(doc, creative_root="assets-out", allow_protected=(), lint=True, online
                     problems.append(f"{where}: creative {path} not found (run `asokit assets render --variant {entry['creative']}`)")
                 else:
                     problems += [f"{name}: {p}" for p in creative.check({locale: path})]
+                header = header_path(doc, creative_root, entry["creative"], locale)
+                if header.exists():
+                    problems += [f"{name}: header {p}" for p in creative.check({locale: header}, expected=creative.HEADER)]
             seen = set()
             for keyword in (norm(k) for k in entry["keywords"]):
                 if keyword in seen:
@@ -199,18 +207,22 @@ def check(doc, creative_root="assets-out", allow_protected=(), lint=True, online
 
 
 def desired_media(doc, entry, locale, creative_root):
+    """(screenshot sha sequences, creative) where creative is None or
+    (search_sha, header_sha | None) — header_sha only when a dedicated header file exists."""
     screenshots = []
     for shot in entry["screenshots"]:
         screenshots.append([reference_name(p.name, p.read_bytes())[1] for p in select_screenshots(shot, doc["_root"])])
-    creative_sha = None
+    creative_shas = None
     if entry.get("creative"):
         path = creative_path(doc, creative_root, entry["creative"], locale)
-        creative_sha = reference_name(path.name, path.read_bytes())[1]
-    return screenshots, creative_sha
+        header = header_path(doc, creative_root, entry["creative"], locale)
+        header_sha = reference_name(header.name, header.read_bytes())[1] if header.exists() else None
+        creative_shas = (reference_name(path.name, path.read_bytes())[1], header_sha)
+    return screenshots, creative_shas
 
 
 def media_differs(media, placements, creative_supported):
-    screenshots, creative_sha = media
+    screenshots, creative_shas = media
     groups = {}
     for row in placements:
         if row.get("state") == "FAILED":
@@ -219,10 +231,12 @@ def media_differs(media, placements, creative_supported):
     current_shots = [seq for (ptype, _), seq in groups.items() if ptype == SCREENSHOT]
     if any(seq not in current_shots for seq in screenshots):
         return True
-    if creative_sha and creative_supported:
-        creative_groups = [seq for (ptype, _), seq in groups.items() if ptype in (HEADER, SEARCH)]
-        if not creative_groups or any(seq != [creative_sha] for seq in creative_groups):
-            return True
+    if creative_shas and creative_supported:
+        search_sha, header_sha = creative_shas
+        for ptype, sha in ((HEADER, header_sha or search_sha), (SEARCH, search_sha)):
+            current = [seq for (kind, _), seq in groups.items() if kind == ptype]
+            if not current or any(seq != [sha] for seq in current):
+                return True
     return False
 
 

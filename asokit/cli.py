@@ -12,7 +12,7 @@
   asokit products check <file>         validate product text limits
   asokit products push <file> [--apply]  sync product text (dry run unless --apply)
   asokit products apply <file> [--apply]  provision products, prices, availability
-  asokit assets render [--variant V]   render header/search creatives from assets.json
+  asokit assets render [--variant V]   render search (universal) + header creatives from assets.json
   asokit assets status [--catalog]     library, asset states, placements
   asokit assets push DIR --target default [--apply]   place creatives
   asokit assets submit DIR [--apply]   standalone review of creatives
@@ -1061,12 +1061,19 @@ def cmd_assets_render(args):
         for name in variants:
             result = render.render_variant(cfg, name, out_dir, locales=args.locales.split(",") if args.locales else None,
                                            lint=not args.no_lint, strict_lint=args.strict_lint)
-            print(f"{name}: {len(result['written'])} written → {out_dir / name}")
+            headers = f"; {len(result['header_written'])} header → {out_dir / name / 'header'}" if result["header_written"] else ""
+            print(f"{name}: {len(result['written'])} written → {out_dir / name}{headers}")
             for row in result["report"]:
-                flags = [f for f, on in (("TIGHT", row["tight"]), ("fallback-headline", row["fallback"])) if on]
+                head = row.get("header")
+                flags = [f for f, on in (("TIGHT", row["tight"]), ("fallback-headline", row["fallback"]),
+                                         ("header-TIGHT", bool(head and head["tight"])),
+                                         ("header-no-devices", bool(head) and head["devices"] == 0)) if on]
                 if flags:
-                    print(f"  {row['locale']:<8} verb {row['verb_px']}px×{row['verb_lines']}  desc {row['descriptor_px']}px×"
-                          f"{row['descriptor_lines']}  device {row['device_width_pct']}%  {' '.join(flags)}")
+                    line = (f"  {row['locale']:<8} verb {row['verb_px']}px×{row['verb_lines']}  desc {row['descriptor_px']}px×"
+                            f"{row['descriptor_lines']}  device {row['device_width_pct']}%")
+                    if head:
+                        line += f"  | header verb {head['verb_px']}px desc {head['descriptor_px']}px"
+                    print(f"{line}  {' '.join(flags)}")
             for locale, reason in sorted(result["failed"].items()):
                 print(f"  FAILED {locale}: {reason}")
                 failed_any = True
@@ -1136,8 +1143,12 @@ def _default_target(app_id, bearer):
 
 
 def _creative_plan(args):
+    """(universal plan, header plan): DIR/<locale>.png and the optional DIR/header/<locale>.png."""
     plan = _locales_filter(creative.plan_from_directory(args.directory), args.locales)
-    problems = creative.check(plan)
+    headers = _locales_filter(creative.header_plan_from_directory(args.directory), args.locales)
+    problems = creative.check(plan) + [f"header {p}" for p in creative.check(headers, expected=creative.HEADER)]
+    problems += [f"{locale}: header/{locale}.png has no universal {locale}.png beside it (search results need it)"
+                 for locale in sorted(set(headers) - set(plan))]
     if problems:
         print("validation failed — nothing sent:")
         for problem in problems:
@@ -1145,7 +1156,7 @@ def _creative_plan(args):
         sys.exit(1)
     if not plan:
         sys.exit(f"no <locale>.png files in {args.directory}")
-    return plan
+    return plan, headers
 
 
 def _resolve_target(args, app_id, bearer):
@@ -1168,7 +1179,7 @@ def _resolve_target(args, app_id, bearer):
 
 def cmd_assets_push(args):
     _, app_id = _require_app_id(args)
-    plan = _creative_plan(args)
+    plan, headers = _creative_plan(args)
     bearer = _bearer()
     parent_kind, parents, feature = _resolve_target(args, app_id, bearer)
     missing = sorted(set(plan) - set(parents))
@@ -1176,9 +1187,8 @@ def cmd_assets_push(args):
         sys.exit(f"no localization on the target for: {', '.join(missing)} — nothing sent")
     catalog = library.Catalog.fetch(bearer)
     lib = library.library_id(app_id, bearer)
-    requests = [{"locale": locale, "parent_kind": parent_kind, "parent_id": parents[locale],
-                 "placement_types": [library.HEADER, library.SEARCH], "category": library.CREATIVE,
-                 "files": [(path.name, path.read_bytes())]} for locale, path in sorted(plan.items())]
+    requests = [request for locale, path in sorted(plan.items())
+                for request in library.creative_requests(locale, parent_kind, parents[locale], path, headers.get(locale))]
     book = ledger_module.for_config(_config_path(args), args.apply)
     try:
         actions = library.sync_groups(requests, catalog, feature, lib, bearer, args.apply, ledger=book,
@@ -1193,7 +1203,7 @@ def cmd_assets_push(args):
 
 def cmd_assets_submit(args):
     _, app_id = _require_app_id(args)
-    plan = _creative_plan(args)
+    plan, headers = _creative_plan(args)
     bearer = _bearer()
     # Read-only guard before any upload (and the up-to-15-minute wait):
     # submit() re-checks item by item, but a doomed run should cost nothing.
@@ -1203,7 +1213,9 @@ def cmd_assets_submit(args):
         sys.exit(str(error))
     lib = library.library_id(app_id, bearer)
     uploader = library.Uploader(lib, bearer, args.apply)
-    assets = {locale: uploader.ensure(path.name, path.read_bytes(), library.CREATIVE) for locale, path in sorted(plan.items())}
+    files = [(locale, library.creative_upload_name(path), path) for locale, path in sorted(plan.items())]
+    files += [(locale, library.creative_upload_name(path, header=True), path) for locale, path in sorted(headers.items())]
+    assets = {(locale, name): uploader.ensure(name, path.read_bytes(), library.CREATIVE) for locale, name, path in files}
     # Every asset without a specId — fresh uploads and reused UPLOAD_COMPLETE
     # rows alike — must finish processing first (mirrors library.sync_groups).
     unprocessed = sorted({a["asset"] for a in assets.values() if not a.get("specId")})
@@ -1217,7 +1229,7 @@ def cmd_assets_submit(args):
             if a["asset"] in states:
                 a["state"] = states[a["asset"]]["state"]
     items = []
-    for locale, a in assets.items():
+    for (locale, _), a in assets.items():
         if a.get("state") in library.IN_OR_PAST_REVIEW:
             print(f"  {locale:<8} {a['name']:<24} skipped — already {a['state']}")
             continue
@@ -1591,7 +1603,7 @@ def build_parser():
     assets_status.add_argument("--app-id")
     assets_status.add_argument("--catalog", action="store_true", help="dump Apple's placement/spec catalog instead")
     assets_status.set_defaults(func=cmd_assets_status)
-    assets_push = assets_sub.add_parser("push", help="place DIR/<locale>.png as header + search asset (dry run unless --apply)")
+    assets_push = assets_sub.add_parser("push", help="place DIR/<locale>.png as search (+ header unless DIR/header/<locale>.png exists) asset (dry run unless --apply)")
     assets_push.add_argument("directory")
     assets_push.add_argument("--target", required=True, help="'default' or 'cpp:<page name>'")
     assets_push.add_argument("--locales")

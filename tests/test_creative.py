@@ -27,6 +27,24 @@ class PlanTests(unittest.TestCase):
             plan = creative.plan_from_directory(tmp)
             self.assertEqual(sorted(plan), ["de-DE", "en-US"])
 
+    def test_universal_plan_ignores_header_dir_and_header_plan_reads_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "en-US.png").write_bytes(png_bytes(5244, 2950))
+            self.assertEqual(creative.header_plan_from_directory(tmp), {})
+            (Path(tmp) / "header").mkdir()
+            for name in ("en-US.png", "_contact.png", ".x.png"):
+                (Path(tmp) / "header" / name).write_bytes(png_bytes(3840, 1646))
+            self.assertEqual(sorted(creative.plan_from_directory(tmp)), ["en-US"])
+            self.assertEqual(creative.header_plan_from_directory(tmp), {"en-US": Path(tmp) / "header" / "en-US.png"})
+
+    def test_header_size_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "en-US.png"
+            path.write_bytes(png_bytes(3840, 1646))
+            self.assertEqual(creative.HEADER, (3840, 1646))
+            self.assertEqual(creative.check({"en-US": path}, expected=creative.HEADER), [])
+            self.assertTrue(creative.check({"en-US": path}))
+
 
 class CheckTests(unittest.TestCase):
     def _plan(self, tmp, **kwargs):

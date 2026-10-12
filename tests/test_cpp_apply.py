@@ -6,7 +6,7 @@ from pathlib import Path
 
 from asokit import asc, cpp, cpp_apply, library, review
 from tests.fakes import FakeCppConnect, install
-from tests.test_cpp import make_doc, page
+from tests.test_cpp import add_header, make_doc, page
 
 
 class SnapshotTests(unittest.TestCase):
@@ -88,6 +88,33 @@ class PushTests(unittest.TestCase):
         self.assertEqual(self.fake.group(en_us, "G_IPHONE_L"), ["06-entry.png", "02-stats.png"])
         self.assertEqual(self.fake.group(en_us, "G_HEADER"), ["en-US.png"])
         self.assertEqual(self.fake.group(en_us, "G_SEARCH"), ["en-US.png"])
+
+    def test_header_file_goes_to_header_placement_and_second_push_writes_nothing(self):
+        add_header(self.doc, "en-US")
+        result = self.push()
+        self.assertEqual(result["problems"], [])
+        locs = {l["locale"]: lid for lid, l in self.fake.cpp_locs.items()}
+        self.assertEqual(self.fake.group(locs["en-US"], "G_HEADER"), ["header-en-US.png"])
+        self.assertEqual(self.fake.group(locs["en-US"], "G_SEARCH"), ["en-US.png"])
+        self.assertEqual(self.fake.group(locs["en-GB"], "G_HEADER"), ["en-GB.png"])
+        self.assertEqual(self.fake.group(locs["en-GB"], "G_SEARCH"), ["en-GB.png"])
+        before = len(self.fake.writes())
+        self.assertEqual(self.push()["actions"], [])
+        self.assertEqual(len(self.fake.writes()), before)
+
+    def test_header_change_on_editable_version_resyncs_only_the_header(self):
+        add_header(self.doc, "en-US")
+        self.push()
+        add_header(self.doc, "en-US", payload=b"v2")
+        result = self.push()
+        self.assertEqual([(a["op"], a["locale"]) for a in result["actions"]], [("sync_media", "en-US")])
+        en_us = next(lid for lid, l in self.fake.cpp_locs.items() if l["locale"] == "en-US")
+        header_images = [p["image"] for p in self.fake.placements.values() if p["parent_id"] == en_us and p["group"] == "G_HEADER"]
+        self.assertEqual(len(header_images), 1)
+        self.assertTrue(self.fake.images[header_images[0]]["referenceName"].endswith("header-en-US.png"))
+        before = len(self.fake.writes())
+        self.assertEqual(self.push()["actions"], [])
+        self.assertEqual(len(self.fake.writes()), before)
 
     def test_second_push_is_a_no_op(self):
         self.push()

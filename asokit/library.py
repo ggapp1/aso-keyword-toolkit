@@ -470,6 +470,27 @@ def sync_groups(requests, catalog, feature, library, bearer, apply, ledger=None,
     return place_prepared(requests, catalog, feature, bearer, apply, ledger=ledger, command=command, progress=progress)
 
 
+def creative_upload_name(path, header=False):
+    """Library file name of a creative: a dedicated header file is uploaded as
+    `header-<locale>.png` so it is told apart from the universal file in the library."""
+    name = Path(path).name
+    return f"header-{name}" if header else name
+
+
+def creative_requests(locale, parent_kind, parent_id, universal, header=None):
+    """Library requests placing one locale's creative files.
+
+    With a dedicated header file, the universal file serves search results only and
+    the header file the product-page header; without one, the universal file serves both.
+    """
+    base = {"locale": locale, "parent_kind": parent_kind, "parent_id": parent_id, "category": CREATIVE}
+    universal_file = (creative_upload_name(universal), Path(universal).read_bytes())
+    if header is None:
+        return [dict(base, placement_types=[HEADER, SEARCH], files=[universal_file])]
+    return [dict(base, placement_types=[SEARCH], files=[universal_file]),
+            dict(base, placement_types=[HEADER], files=[(creative_upload_name(header, header=True), Path(header).read_bytes())])]
+
+
 def _resolve_groups(catalog, feature, ptype, request):
     """Groups every asset of the request can go to; screenshots need exactly one."""
     per_asset = []

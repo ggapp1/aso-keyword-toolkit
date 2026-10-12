@@ -25,6 +25,13 @@ def make_doc(tmp, pages, protected=None):
     return cpp.load(root / "cpp.json")
 
 
+def add_header(doc, locale, payload=b"", variant="bpd"):
+    path = Path(doc["_root"]) / "assets-out" / variant / "header" / f"{locale}.png"
+    path.parent.mkdir(exist_ok=True)
+    path.write_bytes(png_bytes(3840, 1646) + f"header{variant}{locale}".encode() + payload)
+    return path
+
+
 def page(name="BPD tracker", keywords=("bpd", "borderline"), extra_locales=None, **fields):
     locales = {"en-US": {"promotionalText": "Log mood swings and triggers.", "keywords": list(keywords),
                          "screenshots": [{"dir": "shots/en-US", "order": ["06", "02"], "display": "APP_IPHONE_67"}],
@@ -192,7 +199,9 @@ def live_snap(doc, state="APPROVED", keywords=("bpd", "borderline"), promo="Log 
                          "asset": f"a{n}", "sha": reference_name(name, data)[1]})
         data = (root / "assets-out" / "bpd" / f"{loc}.png").read_bytes() if (root / "assets-out" / "bpd" / f"{loc}.png").exists() else b"x"
         sha = reference_name(f"{loc}.png", data)[1]
-        rows += [{"id": f"ph-{loc}", "type": "PRODUCT_PAGE_HEADER_ASSET", "group": "G_HEADER", "state": "PARENT_APPROVED", "asset": "c", "sha": sha},
+        header_file = root / "assets-out" / "bpd" / "header" / f"{loc}.png"
+        header_sha = reference_name(header_file.name, header_file.read_bytes())[1] if header_file.exists() else sha
+        rows += [{"id": f"ph-{loc}", "type": "PRODUCT_PAGE_HEADER_ASSET", "group": "G_HEADER", "state": "PARENT_APPROVED", "asset": "h", "sha": header_sha},
                  {"id": f"ps-{loc}", "type": "APP_STORE_SEARCH_RESULTS_ASSET", "group": "G_SEARCH", "state": "PARENT_APPROVED", "asset": "c", "sha": sha}]
         return rows
 
@@ -317,6 +326,52 @@ class PlanTests(unittest.TestCase):
         lone["locales"] = {}
         snap = live_snap(self.doc, locales=("en-AU",))
         self.assertEqual(cpp.plan(lone, snap, self.doc, prune=True), [])
+
+    def test_header_file_present_and_placed_plans_nothing(self):
+        for loc in ("en-US", "en-GB"):
+            add_header(self.doc, loc)
+        snap = live_snap(self.doc, locales=("en-US", "en-GB"))
+        self.assertEqual(cpp.plan(self.page, snap, self.doc), [])
+        editable = live_snap(self.doc, state="PREPARE_FOR_SUBMISSION", locales=("en-US", "en-GB"))
+        self.assertEqual(cpp.plan(self.page, editable, self.doc), [])
+
+    def test_header_change_only_needs_media_sync(self):
+        for loc in ("en-US", "en-GB"):
+            add_header(self.doc, loc)
+        live = live_snap(self.doc, locales=("en-US", "en-GB"))
+        editable = live_snap(self.doc, state="PREPARE_FOR_SUBMISSION", locales=("en-US", "en-GB"))
+        add_header(self.doc, "en-US", payload=b"v2")
+        self.assertEqual(self.ops(cpp.plan(self.page, live, self.doc)), ["create_version"])
+        actions = cpp.plan(self.page, editable, self.doc)
+        self.assertEqual([(a["op"], a["locale"]) for a in actions], [("sync_media", "en-US")])
+
+    def test_new_header_file_replaces_universal_header_placement(self):
+        snap = live_snap(self.doc, state="PREPARE_FOR_SUBMISSION", locales=("en-US", "en-GB"))   # header holds the universal
+        add_header(self.doc, "en-GB")
+        actions = cpp.plan(self.page, snap, self.doc)
+        self.assertEqual([(a["op"], a["locale"]) for a in actions], [("sync_media", "en-GB")])
+
+    def test_desired_media_and_media_differs_per_placement_type(self):
+        add_header(self.doc, "en-US")
+        entry = self.page["locales"]["en-US"]
+        _, (search_sha, header_sha) = cpp.desired_media(self.doc, entry, "en-US", "assets-out")
+        self.assertNotEqual(search_sha, header_sha)
+        rows = [{"type": "PRODUCT_PAGE_HEADER_ASSET", "group": "G_HEADER", "sha": header_sha},
+                {"type": "APP_STORE_SEARCH_RESULTS_ASSET", "group": "G_SEARCH", "sha": search_sha}]
+        self.assertFalse(cpp.media_differs(([], (search_sha, header_sha)), rows, True))
+        swapped = [dict(rows[0], sha=search_sha), dict(rows[1], sha=header_sha)]
+        self.assertTrue(cpp.media_differs(([], (search_sha, header_sha)), swapped, True))
+        self.assertTrue(cpp.media_differs(([], (search_sha, header_sha)), rows[:1], True))
+        self.assertFalse(cpp.media_differs(([], (search_sha, None)), [dict(r, sha=search_sha) for r in rows], True))
+
+    def test_check_validates_header_size_and_tolerates_missing_header(self):
+        self.assertEqual(cpp.check(self.doc, online=online())[0], [])
+        path = Path(self.doc["_root"]) / "assets-out" / "bpd" / "header" / "en-US.png"
+        path.parent.mkdir()
+        path.write_bytes(png_bytes(5244, 2950))
+        problems, _ = cpp.check(self.doc, online=online())
+        self.assertTrue(any("expected 3840×1646" in p for p in problems), problems)
+        self.assertEqual(cpp.header_path(self.doc, "assets-out", "bpd", "en-US"), path)
 
     def test_missing_page_with_no_locales_in_scope_is_skipped(self):
         actions = cpp.plan(self.page, None, self.doc, locales=["fr-FR"])

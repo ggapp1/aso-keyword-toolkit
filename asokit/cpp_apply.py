@@ -249,9 +249,9 @@ def _media_requests(page, actions, doc, ctx, creative_root, locales):
                              "files": [(p.name, p.read_bytes()) for p in files]})
         if entry.get("creative") and ctx["creative_supported"]:
             path = cpp.creative_path(doc, creative_root, entry["creative"], locale)
-            requests.append({"locale": locale, "parent_kind": "appCustomProductPageLocalization", "parent_id": None,
-                             "placement_types": [library.HEADER, library.SEARCH], "category": library.CREATIVE,
-                             "files": [(path.name, path.read_bytes())]})
+            header = cpp.header_path(doc, creative_root, entry["creative"], locale)
+            requests += library.creative_requests(locale, "appCustomProductPageLocalization", None, path,
+                                                  header if header.exists() else None)
         if requests:
             media[locale] = requests
     return media

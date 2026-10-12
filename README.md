@@ -526,11 +526,24 @@ before any surface is touched. Concretely:
 
 ### Rendering creatives from `assets.json`
 
-The header and search-results asset is one universal image, exactly
-**5244 × 2950**, cropped by Apple to 21:9 for the product-page header and to
-3:2 for search results. `assets render` draws a headline and one or two device
-captures inside the intersection of both crops, so nothing important is ever
-cut off. `assets.json` lives next to `asokit.json` by default (`--assets PATH`
+`assets render` writes two files per locale:
+
+- the **universal** image, exactly **5244 × 2950**, which serves search
+  results (and the header too, when no header file exists). The headline and
+  one or two device captures sit inside the intersection of the 21:9 and 3:2
+  crops;
+- a dedicated **product-page header** image, exactly **3840 × 1646**.
+
+Why two: App Store Connect previews (October 2026) show the universal image
+whole and uncropped in search results on iPhone and iPad, but the product-page
+header crops it hard — iPhone keeps only the centre ~53% of the width, iPad the
+full width but only the top ~55% of the height, iPhone Duo the centre ~65% —
+and the status bar, Dynamic Island, back/share buttons and iPad tab bar cover
+the top band and corners. A left-aligned headline gets cut on iPhone. The
+header file centres the headline in a zone every device shows (x 800–3040,
+y 380–1150) and puts one phone at each far side, fully outside the centre band
+(x 677–3163), so the iPhone crop shows a clean headline. Search keeps the
+universal file. `assets.json` lives next to `asokit.json` by default (`--assets PATH`
 points elsewhere):
 
 ```json
@@ -548,6 +561,11 @@ points elsewhere):
   "type": {"verb": {"size": 360, "min": 220, "step": 10, "lines": 2, "leading": 1.02},
            "descriptor": {"size": 220, "min": 150, "step": 6, "lines": 2, "leading": 1.12},
            "tight": {"verb": 260, "descriptor": 170}},
+  "header": {"enabled": true, "canvas": {"width": 3840, "height": 1646},
+             "zone": [800, 380, 3040, 1150], "centreBand": [677, 3163], "deviceTop": 200,
+             "type": {"verb": {"size": 260, "min": 150, "step": 10, "lines": 1, "leading": 1.02},
+                      "descriptor": {"size": 130, "min": 80, "step": 6, "lines": 1, "leading": 1.12},
+                      "tight": {"verb": 190, "descriptor": 100}}},
   "variants": {
     "default": {
       "captures": ["{ui}/01-log-home.png", "{ui}/03-stats-insights.png"],
@@ -568,6 +586,20 @@ points elsewhere):
 key, so `{"verb": {"size": 400}}` changes the size and keeps the rest. Fonts
 are keyed by locale with `default` covering the rest.
 
+`header` is optional too; the values shown are the defaults, and its `type`
+merges the same way (the top-level `type` applies only to the universal file).
+The header uses the same brand colours, fonts, headline sources and lint as
+the universal file. Its headline is centred in `zone` — verb on one line,
+descriptor on one line. Each phone is centred in the space outside
+`centreBand`, at or below `deviceTop`, and may run off the bottom edge. The
+left phone shows the first capture and the right phone the second, or the
+first again when there is only one; RTL locales swap them. When a side is too
+narrow for a legible phone, the header has no phones and the report says
+`header-no-devices` — phones and their shadows never enter the band.
+`"header": {"enabled": false}` renders the universal file only (and removes a
+header file left over from an earlier render, so it can't be placed by
+mistake).
+
 Headlines come either inline (`[verb, descriptor]` or `{"same": locale}`) or
 from a headlines file via `from`, where `slot` is an index or a named slot and
 `fallbackSlot` covers locales that lack it. A named slot that some locales
@@ -585,16 +617,19 @@ asokit assets render                          # every variant, every locale it c
 asokit assets render --variant bpd --locales en-US,en-GB
 ```
 
-Output goes to `assets-out/<variant>/<locale>.png` (change it with `--out`),
-plus a contact sheet per variant at `assets-out/_contact/<variant>.png` —
-review that before uploading anything. The report flags `TIGHT` locales whose
-type had to shrink below the tight thresholds and locales that used the
-fallback headline.
+Output goes to `assets-out/<variant>/<locale>.png` and
+`assets-out/<variant>/header/<locale>.png` (change the root with `--out`),
+plus contact sheets per variant at `assets-out/_contact/<variant>.png` and
+`assets-out/_contact/<variant>-header.png`. Review them before uploading
+anything. The report flags `TIGHT` and `header-TIGHT` locales whose type had
+to shrink below the tight thresholds, locales that used the fallback headline,
+and `header-no-devices`.
 
 **A locale that can't be rendered properly fails on its own.** If its text
-won't fit the safe box at the minimum size and line count, or its headline
-fails the lint, that locale is reported, its old output file is deleted (so a
-stale image can't be uploaded by mistake), and the other locales still render.
+won't fit the safe box (or the header zone) at the minimum size and line count,
+or its headline fails the lint, that locale is reported, and its old universal
+and header files are both deleted (so a stale image can't be uploaded by
+mistake). The other locales still render.
 The lint catches what App Review rejects on creatives: prices and offers,
 URLs, rank and award claims, other platforms, medical claims. Languages
 without a word list get a warning, which `--strict-lint` turns into an error;
@@ -603,8 +638,9 @@ without it, a variant with any RTL locale in scope stops before drawing
 anything — the whole variant, not just that locale.
 
 The files must be **8-bit RGB PNGs** (colour type 2) with no alpha channel and
-no `tRNS` chunk, at exactly 5244 × 2950. Rendered output already is; files you
-export from a design tool are checked the same way before upload.
+no `tRNS` chunk, at exactly 5244 × 2950 (universal) or 3840 × 1646 (header).
+Rendered output already is; files you export from a design tool are checked
+the same way before upload.
 
 ### Placing creatives
 
@@ -617,8 +653,12 @@ asokit assets push assets-out/bpd --target "cpp:BPD tracker" --apply
 asokit assets submit assets-out/default --apply                  # review them on their own
 ```
 
-`push` reads `DIR/<locale>.png` and places each file as both the product-page
-header asset and the search-results asset for that locale. `--target default`
+`push` reads `DIR/<locale>.png` and, when it exists, `DIR/header/<locale>.png`.
+With a header file, the header file goes to the product-page header placement
+and the universal file to the search-results placement (uploaded as
+`header-<locale>.png` and `<locale>.png`). Without one, the universal file
+goes to both placements, as before. A header file with no universal file beside
+it is a validation error. `--target default`
 writes to the editable App Store version — the asset ships with your next
 release; `--target cpp:<name>` writes to a custom product page that already
 has an editable version (run `cpp push` first — `assets push` never creates
@@ -628,7 +668,7 @@ optimization test is running.
 `assets submit` sends the uploaded creatives to App Review by themselves,
 placing nothing, so they can be approved ahead of the version they will ride
 with. It runs a read-only preflight before uploading anything and skips assets
-already in or past review.
+already in or past review. Header files are submitted with them.
 
 ### Custom product pages from `cpp.json`
 
@@ -668,7 +708,12 @@ read from next to `asokit.json` unless `--file PATH` says otherwise.
   version has must be listed.
 - `screenshots[].order` picks and orders files by name prefix; `creative`
   names a rendered variant, read from `<creative-root>/<variant>/<locale>.png`
-  (`--creative-root`, default `assets-out`).
+  (`--creative-root`, default `assets-out`). When
+  `<creative-root>/<variant>/header/<locale>.png` exists, it becomes the header
+  placement and the universal file serves search only. `cpp check` validates
+  its size, and `cpp push` compares each placement against its own file, so
+  changing only the header resyncs the media (or opens a new version on a live
+  page).
 - `same` copies `promotionalText`, `screenshots` and `creative` — **never
   keywords** (`deepLink` is set once per page, not per locale). Keyword pools differ by locale, so keywords are
   always explicit.

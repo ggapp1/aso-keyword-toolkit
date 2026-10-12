@@ -146,6 +146,144 @@ class RenderTests(unittest.TestCase):
                 render.render_variant(cfg, "v", Path(tmp) / "out", locales=["de-DE"])
 
 
+HEADER_ZONE = (800, 380, 3040, 1150)
+CENTRE_BAND = (677, 3163)
+
+
+def _ink_bbox(image, threshold=200):
+    """Bounding box of near-white (text) pixels."""
+    from PIL import ImageChops
+    r, g, b = image.convert("RGB").split()
+    return ImageChops.darker(r, ImageChops.darker(g, b)).point(lambda v: 255 if v > threshold else 0).getbbox()
+
+
+def _darker_than_background_bbox(region):
+    """Pixels darker than the brand background in any channel: devices, frames, shadows (text only lightens)."""
+    from PIL import ImageChops
+    diff = ImageChops.subtract(Image.new("RGB", region.size, BG), region.convert("RGB"))
+    r, g, b = diff.split()
+    return ImageChops.lighter(r, ImageChops.lighter(g, b)).point(lambda v: 255 if v > 2 else 0).getbbox()
+
+
+def _colour_centre_x(path, colour):
+    image = Image.open(path).convert("RGB")
+    small = image.resize((image.width // 8, image.height // 8), Image.NEAREST)
+    xs = [x * 8 for y in range(small.height) for x in range(small.width) if small.getpixel((x, y)) == colour]
+    return sum(xs) / len(xs) if xs else None
+
+
+@unittest.skipUnless(HAVE_PIL, "Pillow not installed")
+class HeaderRenderTests(unittest.TestCase):
+    def render(self, tmp, heads, captures=("{ui}/one.png", "{ui}/two.png"), header=None, rtl=None, **kwargs):
+        cfg = write_config(tmp, {"v": variant(heads, captures=captures)}, rtl=rtl)
+        if header is not None:
+            cfg["header"] = header
+        return cfg, render.render_variant(cfg, "v", Path(tmp) / "out", **kwargs)
+
+    def test_header_file_size_mode_text_zone_and_clear_centre_band(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, result = self.render(tmp, {"en-US": ["LOG MOOD SWINGS", "TRIGGERS, SYMPTOMS & PATTERNS"]})
+            self.assertEqual(result["failed"], {})
+            path = Path(tmp) / "out" / "v" / "header" / "en-US.png"
+            image = Image.open(path)
+            self.assertEqual((image.size, image.mode), ((3840, 1646), "RGB"))
+            ink = _ink_bbox(image)
+            x0, y0, x1, y1 = HEADER_ZONE
+            self.assertTrue(ink[0] >= x0 and ink[1] >= y0 and ink[2] <= x1 and ink[3] <= y1, (ink, HEADER_ZONE))
+            # Centred horizontally in the zone (within a few px).
+            self.assertLess(abs((ink[0] + ink[2]) / 2 - (x0 + x1) / 2), 12, ink)
+            band = image.crop((CENTRE_BAND[0], 0, CENTRE_BAND[1], 1646))
+            self.assertIsNone(_darker_than_background_bbox(band))
+            # Devices: capture[0] (red) on the left, capture[1] (green) on the right, outside the band.
+            red, green = _colour_centre_x(path, (255, 0, 0)), _colour_centre_x(path, (0, 255, 0))
+            self.assertLess(red, CENTRE_BAND[0])
+            self.assertGreater(green, CENTRE_BAND[1])
+            self.assertTrue((Path(tmp) / "out" / "_contact" / "v-header.png").exists())
+            row = result["report"][0]
+            self.assertEqual(row["header"]["devices"], 2)
+            self.assertIn("verb_px", row["header"])
+
+    def test_single_capture_is_used_on_both_sides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, result = self.render(tmp, {"en-US": ["LOG", "Patterns"]}, captures=("{ui}/one.png",))
+            self.assertEqual(result["failed"], {})
+            image = Image.open(Path(tmp) / "out" / "v" / "header" / "en-US.png").convert("RGB")
+            self.assertEqual(image.getpixel((340, 900)), (255, 0, 0))
+            self.assertEqual(image.getpixel((3500, 900)), (255, 0, 0))
+
+    def test_no_room_for_devices_skips_them(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, result = self.render(tmp, {"en-US": ["LOG", "Patterns"]},
+                                    header={"centreBand": [60, 3780]})
+            self.assertEqual(result["failed"], {})
+            image = Image.open(Path(tmp) / "out" / "v" / "header" / "en-US.png")
+            self.assertIsNone(_darker_than_background_bbox(image))
+            self.assertEqual(result["report"][0]["header"]["devices"], 0)
+
+    def test_default_header_type_fits_realistic_headlines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            heads = {"en-US": ["LOG MOOD SWINGS", "TRIGGERS, SYMPTOMS & PATTERNS"],
+                     "en-GB": ["SEE THE PATTERNS", "MOOD, SLEEP & MEDS IN ONE PLACE"],
+                     "de-DE": ["STIMMUNG ERFASSEN", "AUSLÖSER, SYMPTOME & MUSTER"]}
+            _, result = self.render(tmp, heads)
+            self.assertEqual(result["failed"], {})
+            self.assertEqual(len(result["header_written"]), 3)
+
+    def test_header_that_cannot_fit_fails_the_locale_and_deletes_both_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, result = self.render(tmp, {"en-US": ["LOG", "Patterns and triggers"]})
+            universal = Path(tmp) / "out" / "v" / "en-US.png"
+            header = Path(tmp) / "out" / "v" / "header" / "en-US.png"
+            self.assertTrue(universal.exists() and header.exists())
+            cfg["header"] = {"type": {"descriptor": {"size": 600, "min": 600}}}
+            result = render.render_variant(cfg, "v", Path(tmp) / "out")
+            self.assertIn("header", result["failed"].get("en-US", ""))
+            self.assertFalse(universal.exists())
+            self.assertFalse(header.exists())
+
+    def test_universal_failure_also_deletes_a_stale_header(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, _ = self.render(tmp, {"en-US": ["LOG", "Patterns"]})
+            header = Path(tmp) / "out" / "v" / "header" / "en-US.png"
+            self.assertTrue(header.exists())
+            cfg["variants"]["v"]["headlines"]["en-US"] = ["FREE TRIAL", "Patterns"]
+            render.render_variant(cfg, "v", Path(tmp) / "out")
+            self.assertFalse(header.exists())
+
+    def test_disabled_header_writes_no_header_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, result = self.render(tmp, {"en-US": ["LOG", "Patterns"]}, header={"enabled": False})
+            self.assertEqual(result["failed"], {})
+            self.assertTrue((Path(tmp) / "out" / "v" / "en-US.png").exists())
+            self.assertFalse((Path(tmp) / "out" / "v" / "header").exists())
+            self.assertFalse((Path(tmp) / "out" / "_contact" / "v-header.png").exists())
+            self.assertIsNone(result["report"][0]["header"])
+
+    def test_configurable_canvas_and_zone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            header = {"canvas": {"width": 1920, "height": 823}, "zone": [400, 190, 1520, 575], "centreBand": [338, 1582],
+                      "type": {"verb": {"size": 130, "min": 75}, "descriptor": {"size": 65, "min": 40}}}
+            _, result = self.render(tmp, {"en-US": ["LOG", "Patterns"]}, header=header)
+            self.assertEqual(result["failed"], {})
+            image = Image.open(Path(tmp) / "out" / "v" / "header" / "en-US.png")
+            self.assertEqual(image.size, (1920, 823))
+            ink = _ink_bbox(image)
+            self.assertTrue(ink[0] >= 400 and ink[1] >= 190 and ink[2] <= 1520 and ink[3] <= 575, ink)
+
+    @unittest.skipUnless(HAVE_RAQM, "Pillow without libraqm")
+    def test_rtl_header_renders_centred(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, result = self.render(tmp, {"he": ["שלום", "דפוסים"]}, rtl=["he"], lint=False)
+            self.assertEqual(result["failed"], {})
+            image = Image.open(Path(tmp) / "out" / "v" / "header" / "he.png")
+            self.assertEqual(image.size, (3840, 1646))
+            ink = _ink_bbox(image)
+            x0, y0, x1, y1 = HEADER_ZONE
+            self.assertTrue(ink[0] >= x0 and ink[1] >= y0 and ink[2] <= x1 and ink[3] <= y1, ink)
+            band = image.crop((CENTRE_BAND[0], 0, CENTRE_BAND[1], 1646))
+            self.assertIsNone(_darker_than_background_bbox(band))
+
+
 class HeadlineResolutionTests(unittest.TestCase):
     def _cfg(self, tmp, spec):
         source = {"_notes": "x", "_slots": ["track", "spot"],

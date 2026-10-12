@@ -189,6 +189,59 @@ class AssetsCommands(AssetsFixture):
         self.assertIn("PRODUCT_PAGE_HEADER_ASSET", text)
 
 
+class AssetsHeaderFiles(AssetsFixture):
+    """A dedicated header file (DIR/header/<locale>.png) takes the header placement; search keeps the universal file."""
+
+    def add_headers(self, *locales):
+        (self.out / "header").mkdir(exist_ok=True)
+        for locale in locales:
+            (self.out / "header" / f"{locale}.png").write_bytes(png_bytes(3840, 1646) + b"header" + locale.encode())
+
+    def test_without_header_files_both_placements_hold_the_universal_file(self):
+        self.run_cli("assets", "push", str(self.out), "--target", "default", "--apply")
+        self.assertEqual(self.fake.group("vl-en", "G_HEADER"), ["en-US.png"])
+        self.assertEqual(self.fake.group("vl-en", "G_SEARCH"), ["en-US.png"])
+
+    def test_header_file_goes_to_header_universal_to_search_and_rerun_writes_nothing(self):
+        self.add_headers("en-US")
+        self.run_cli("assets", "push", str(self.out), "--target", "default", "--apply")
+        self.assertEqual(self.fake.group("vl-en", "G_HEADER"), ["header-en-US.png"])
+        self.assertEqual(self.fake.group("vl-en", "G_SEARCH"), ["en-US.png"])
+        # de-DE has no header file: back-compat, universal in both.
+        self.assertEqual(self.fake.group("vl-de", "G_HEADER"), ["de-DE.png"])
+        self.assertEqual(self.fake.group("vl-de", "G_SEARCH"), ["de-DE.png"])
+        before = len(self.fake.writes())
+        self.run_cli("assets", "push", str(self.out), "--target", "default", "--apply")
+        self.assertEqual(len(self.fake.writes()), before)
+
+    def test_adding_a_header_file_later_replaces_only_the_header(self):
+        self.run_cli("assets", "push", str(self.out), "--target", "default", "--apply")
+        self.add_headers("en-US")
+        self.run_cli("assets", "push", str(self.out), "--target", "default", "--apply")
+        self.assertEqual(self.fake.group("vl-en", "G_HEADER"), ["header-en-US.png"])
+        self.assertEqual(self.fake.group("vl-en", "G_SEARCH"), ["en-US.png"])
+
+    def test_wrong_size_header_fails_validation_before_any_write(self):
+        (self.out / "header").mkdir()
+        (self.out / "header" / "en-US.png").write_bytes(png_bytes(5244, 2950))
+        with self.assertRaises(SystemExit):
+            self.run_cli("assets", "push", str(self.out), "--target", "default", "--apply")
+        self.assertEqual(self.fake.writes(), [])
+
+    def test_header_without_universal_file_fails_validation(self):
+        self.add_headers("fr-FR")
+        with self.assertRaises(SystemExit):
+            self.run_cli("assets", "push", str(self.out), "--target", "default", "--apply")
+        self.assertEqual(self.fake.writes(), [])
+
+    def test_submit_includes_header_files(self):
+        self.add_headers("en-US")
+        self.run_cli("assets", "submit", str(self.out), "--apply")
+        (sub,) = self.fake.submissions.values()
+        names = sorted(self.fake.images[rid]["fileName"] for _, _, rid in sub["items"])
+        self.assertEqual(names, ["de-DE.png", "en-US.png", "header-en-US.png"])
+
+
 from asokit import library as library_module
 
 

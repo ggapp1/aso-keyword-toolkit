@@ -1,8 +1,16 @@
-"""Render the universal App Store creative (header + search results, 5244×2950).
+"""Render App Store creatives: the universal file (5244×2950, search results)
+and a dedicated product-page header file (3840×1646).
 
 Driven entirely by the app's `assets.json` (see the spec / README): brand
 colours, per-locale fonts and type sizes, and variants — each a headline
 source plus 1–2 app captures. No app-specific code lives here.
+
+Why two files: Apple shows the universal file whole in search results, but
+crops the product-page header hard (iPhone keeps only the centre ~53% width,
+iPad the top ~55% height, with system overlays on the top band and corners).
+The header file centres the headline in a zone every device shows and keeps
+the phones outside the centre band. An optional top-level `"header"` block
+configures it; `"enabled": false` renders the universal file only.
 
 The text fitting, wrapping and device frame are lifted from MoodSync's
 portrait compositor (`screenshots/store/compose.py`) and parameterised.
@@ -20,6 +28,16 @@ DEFAULT_TYPE = {
     "verb": {"size": 360, "min": 220, "step": 10, "lines": 2, "leading": 1.02},
     "descriptor": {"size": 220, "min": 150, "step": 6, "lines": 2, "leading": 1.12},
     "tight": {"verb": 260, "descriptor": 170},
+}
+HEADER_CANVAS = (3840, 1646)
+HEADER_ZONE = (800, 380, 3040, 1150)        # x0, y0, x1, y1: the headline shows here on every device
+HEADER_BAND = (677, 3163)                   # x range devices (and their shadows) stay out of
+HEADER_DEVICE_TOP = 200                     # devices start at or below this y; they may bleed off the bottom
+HEADER_MIN_DEVICE = 0.4                     # skip devices smaller than this fraction of the canvas height
+DEFAULT_HEADER_TYPE = {
+    "verb": {"size": 260, "min": 150, "step": 10, "lines": 1, "leading": 1.02},
+    "descriptor": {"size": 130, "min": 80, "step": 6, "lines": 1, "leading": 1.12},
+    "tight": {"verb": 190, "descriptor": 100},
 }
 
 
@@ -217,14 +235,26 @@ def _fit(cfg, draw, locale, text, max_w, spec, rtl, ImageFont):
 
 # ---------------------------------------------------------------- devices
 
+def _frame_geometry(shot_w, shot_h, frame_height):
+    """(screen w, screen h, bezel, corner radius, scale) of a phone frame `frame_height` px tall overall."""
+    bezel_ratio, radius_ratio = 30 / 1040, 150 / 1040
+    screen_h = frame_height / (1 + 2 * bezel_ratio * shot_w / shot_h)
+    scale = screen_h / shot_h
+    sw, sh = round(shot_w * scale), round(screen_h)
+    return sw, sh, round(sw * bezel_ratio), round(sw * radius_ratio), scale
+
+
+def _shadow_metrics(frame_height):
+    """(blur, drop, margin): the drop shadow's blur radius, offset, and how far it reaches past the frame."""
+    blur = max(1, round(frame_height * 0.015))
+    drop = round(frame_height * 0.012)
+    return blur, drop, 4 * blur + drop
+
+
 def _device(shot, frame_height, frame_colour, Image, ImageDraw):
     """Flat phone frame around a capture, `frame_height` px tall overall."""
     shot = shot.convert("RGB")
-    bezel_ratio, radius_ratio = 30 / 1040, 150 / 1040
-    screen_h = frame_height / (1 + 2 * bezel_ratio * shot.width / shot.height)
-    scale = screen_h / shot.height
-    sw, sh = round(shot.width * scale), round(screen_h)
-    bezel, radius = round(sw * bezel_ratio), round(sw * radius_ratio)
+    sw, sh, bezel, radius, scale = _frame_geometry(shot.width, shot.height, frame_height)
     screen = shot.resize((sw, sh), Image.LANCZOS)
     mask = Image.new("L", (sw, sh), 0)
     ImageDraw.Draw(mask).rounded_rectangle((0, 0, sw - 1, sh - 1), radius=radius, fill=255)
@@ -241,15 +271,75 @@ def _device(shot, frame_height, frame_colour, Image, ImageDraw):
 
 # ---------------------------------------------------------------- composition
 
+def _brand(cfg):
+    brand = cfg.get("brand", {})
+    return (_hex(brand.get("background", "#000000")), _hex(brand.get("text", "#FFFFFF")),
+            _hex(brand.get("frame", "#1C1C1E")))
+
+
+def _types(defaults, overrides):
+    return {key: {**defaults[key], **(overrides or {}).get(key, {})} for key in defaults}
+
+
+def _paste_devices(image, frames, positions, frame_h, Image, ImageDraw, ImageFilter):
+    """Drop shadows, then the frames, at `positions` [(frame index, x, y)]."""
+    blur, drop, _ = _shadow_metrics(frame_h)
+    shadow = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    shadow_draw = ImageDraw.Draw(shadow)
+    for index, x, y in positions:
+        frame = frames[index]
+        shadow_draw.rounded_rectangle((x + blur, y + drop, x + frame.width - blur, y + frame.height + drop),
+                                      radius=round(frame.width * 0.17), fill=(0, 0, 0, 110))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(blur))
+    image.paste(shadow, (0, 0), shadow)
+    for index, x, y in positions:
+        image.paste(frames[index], (x, y), frames[index])
+
+
+def _headline(cfg, draw, locale, head, types, box, text_w, align, where, colour):
+    """Fit the verb and descriptor into `text_w`, centre the block vertically in `box`,
+    and lay out every line (`align` "leading": flush to the reading-start edge;
+    "centre": centred). Each line's ink is checked against `box`, so an oversized
+    type override fails this locale instead of drawing outside it."""
+    ImageFont = _pil()[3]
+    x0, y0, x1, y1 = box
+    rtl = head["rtl"]
+    verb_font, verb_lines, verb_size = _fit(cfg, draw, locale, head["verb"], text_w, types["verb"], rtl, ImageFont)
+    desc_font, desc_lines, desc_size = _fit(cfg, draw, locale, head["descriptor"], text_w, types["descriptor"], rtl, ImageFont)
+    verb_lead = round(verb_size * types["verb"]["leading"])
+    desc_lead = round(desc_size * types["descriptor"]["leading"])
+    gap = round(desc_size * 0.35)
+    block_h = verb_lead * len(verb_lines) + gap + desc_lead * len(desc_lines)
+    y = y0 + (y1 - y0 - block_h) / 2
+    kwargs = {"direction": "rtl"} if rtl else {}
+    placed = []
+    for lines, font, lead in ((verb_lines, verb_font, verb_lead), (desc_lines, desc_font, desc_lead)):
+        for line in lines:
+            left, top_offset, right, bottom = draw.textbbox((0, 0), line, font=font, **kwargs)
+            w = right - left
+            if align == "centre":
+                tx = x0 + round((x1 - x0 - w) / 2)
+            else:
+                tx = x0 if not rtl else x1 - w
+            ink = (tx, y, tx + w, y + bottom - top_offset)
+            if ink[0] < x0 or ink[1] < y0 or ink[2] > x1 or ink[3] > y1:
+                raise RenderError(f"{locale}: headline block ({block_h}px tall) does not fit {where} "
+                                  f"({y1 - y0}px) — lower the type size or line count")
+            placed.append(((tx - left, y - top_offset), line, font))
+            y += lead
+        y += gap
+    for origin, line, font in placed:
+        draw.text(origin, line, font=font, fill=colour, **kwargs)
+    return {"verb_px": verb_size, "verb_lines": len(verb_lines), "descriptor_px": desc_size,
+            "descriptor_lines": len(desc_lines),
+            "tight": verb_size < types["tight"]["verb"] or desc_size < types["tight"]["descriptor"]}
+
+
 def _compose(cfg, variant, locale, head, captures):
     Image, ImageDraw, ImageFilter, ImageFont, _ = _pil()
     canvas = tuple(cfg.get("canvas", {}).get(k) or v for k, v in zip(("width", "height"), CANVAS))
-    brand = cfg.get("brand", {})
-    background = _hex(brand.get("background", "#000000"))
-    text_colour = _hex(brand.get("text", "#FFFFFF"))
-    frame_colour = _hex(brand.get("frame", "#1C1C1E"))
-    overrides = cfg.get("type", {})
-    types = {key: {**DEFAULT_TYPE[key], **overrides.get(key, {})} for key in DEFAULT_TYPE}
+    background, text_colour, frame_colour = _brand(cfg)
+    types = _types(DEFAULT_TYPE, cfg.get("type", {}))
     x0, y0, x1, y1 = safe_box(canvas[0], canvas[1], cfg.get("safeInset", 0.03))
     box_w, box_h = x1 - x0, y1 - y0
     rtl = head["rtl"]
@@ -262,9 +352,7 @@ def _compose(cfg, variant, locale, head, captures):
     offset = 0.06
     frame_h = box_h * 0.86 / (1 + offset * (count - 1))
     frames = [_device(c, frame_h, frame_colour, Image, ImageDraw) for c in captures]
-    blur = max(1, round(frame_h * 0.015))
-    drop = round(frame_h * 0.012)
-    margin = 4 * blur + drop
+    margin = _shadow_metrics(frame_h)[2]
     column_w = box_w * 0.52
     group_w = sum(f.width for f in frames) - round(frames[0].width * 0.04) * (count - 1)
     if group_w + 2 * margin > column_w:
@@ -272,54 +360,82 @@ def _compose(cfg, variant, locale, head, captures):
     column_x0 = x1 - column_w if not rtl else x0
     start_x = column_x0 + (column_w - group_w) / 2
     top = y0 + (box_h - frame_h * (1 + offset * (count - 1))) / 2
-    shadow = Image.new("RGBA", canvas, (0, 0, 0, 0))
-    shadow_draw = ImageDraw.Draw(shadow)
     positions, x = [], start_x
     order = list(range(count)) if not rtl else list(reversed(range(count)))
     for rank, index in enumerate(order):
-        frame = frames[index]
-        y = top + frame_h * offset * rank
-        positions.append((index, round(x), round(y)))
-        shadow_draw.rounded_rectangle((round(x) + blur, round(y) + drop, round(x) + frame.width - blur, round(y) + frame.height + drop),
-                                      radius=round(frame.width * 0.17), fill=(0, 0, 0, 110))
-        x += frame.width - round(frame.width * 0.04)
-    shadow = shadow.filter(ImageFilter.GaussianBlur(blur))
-    image.paste(shadow, (0, 0), shadow)
-    for index, px, py in positions:
-        image.paste(frames[index], (px, py), frames[index])
+        positions.append((index, round(x), round(top + frame_h * offset * rank)))
+        x += frames[index].width - round(frames[index].width * 0.04)
+    _paste_devices(image, frames, positions, frame_h, Image, ImageDraw, ImageFilter)
 
     # Headline: leading side.
-    text_w = box_w * 0.44
-    verb_font, verb_lines, verb_size = _fit(cfg, draw, locale, head["verb"], text_w, types["verb"], rtl, ImageFont)
-    desc_font, desc_lines, desc_size = _fit(cfg, draw, locale, head["descriptor"], text_w, types["descriptor"], rtl, ImageFont)
-    verb_lead = round(verb_size * types["verb"]["leading"])
-    desc_lead = round(desc_size * types["descriptor"]["leading"])
-    gap = round(desc_size * 0.35)
-    block_h = verb_lead * len(verb_lines) + gap + desc_lead * len(desc_lines)
-    y = y0 + (box_h - block_h) / 2
-    kwargs = {"direction": "rtl"} if rtl else {}
-    # Lay out every line first and check its ink against the safe box, so an oversized
-    # type override fails this locale instead of drawing outside the crops.
-    placed = []
-    for lines, font, lead in ((verb_lines, verb_font, verb_lead), (desc_lines, desc_font, desc_lead)):
-        for line in lines:
-            left, top_offset, right, bottom = draw.textbbox((0, 0), line, font=font, **kwargs)
-            w = right - left
-            tx = x0 if not rtl else x1 - w
-            ink = (tx, y, tx + w, y + bottom - top_offset)
-            if ink[0] < x0 or ink[1] < y0 or ink[2] > x1 or ink[3] > y1:
-                raise RenderError(f"{locale}: headline block ({block_h}px tall) does not fit the safe box "
-                                  f"({box_h}px) — lower the type size or line count")
-            placed.append(((tx - left, y - top_offset), line, font))
-            y += lead
-        y += gap
-    for origin, line, font in placed:
-        draw.text(origin, line, font=font, fill=text_colour, **kwargs)
-    report = {"locale": locale, "verb_px": verb_size, "verb_lines": len(verb_lines), "descriptor_px": desc_size,
-              "descriptor_lines": len(desc_lines), "fallback": head["fallback"],
-              "device_width_pct": round(100 * frames[0].width / canvas[0], 1),
-              "tight": verb_size < types["tight"]["verb"] or desc_size < types["tight"]["descriptor"]}
+    text = _headline(cfg, draw, locale, head, types, (x0, y0, x1, y1), box_w * 0.44, "leading", "the safe box", text_colour)
+    report = {"locale": locale, **{k: text[k] for k in ("verb_px", "verb_lines", "descriptor_px", "descriptor_lines")},
+              "fallback": head["fallback"], "device_width_pct": round(100 * frames[0].width / canvas[0], 1),
+              "tight": text["tight"]}
     return image, report
+
+
+def header_settings(cfg):
+    """The resolved `"header"` block: None when disabled, else canvas, zone, band, device top and type."""
+    block = cfg.get("header") or {}
+    if block.get("enabled", True) is False:
+        return None
+    canvas = tuple(block.get("canvas", {}).get(k) or v for k, v in zip(("width", "height"), HEADER_CANVAS))
+    return {"canvas": canvas, "zone": tuple(block.get("zone") or HEADER_ZONE),
+            "band": tuple(block.get("centreBand") or HEADER_BAND),
+            "device_top": block.get("deviceTop", HEADER_DEVICE_TOP),
+            "type": _types(DEFAULT_HEADER_TYPE, block.get("type", {}))}
+
+
+def _header_device_height(captures, side_w, max_h):
+    """Tallest frame (≤ max_h) whose width plus shadow on both sides fits `side_w`; None if none fits."""
+    frame_h = max_h
+    while frame_h > 0:
+        margin = _shadow_metrics(frame_h)[2]
+        widths = []
+        for shot in captures:
+            sw, _, bezel, _, _ = _frame_geometry(shot.width, shot.height, frame_h)
+            widths.append(sw + 2 * bezel)
+        if max(widths) + 2 * margin <= side_w:
+            return frame_h
+        frame_h -= max(1, round(frame_h * 0.01))
+    return None
+
+
+def _compose_header(cfg, settings, locale, head, captures):
+    """The product-page header file: headline centred in the zone, one phone each side outside the band."""
+    Image, ImageDraw, ImageFilter, _, _ = _pil()
+    canvas = settings["canvas"]
+    zx0, zy0, zx1, zy1 = settings["zone"]
+    band_x0, band_x1 = settings["band"]
+    background, text_colour, frame_colour = _brand(cfg)
+    image = Image.new("RGB", canvas, background)
+    draw = ImageDraw.Draw(image)
+
+    # Devices: left side shows capture[0], right side capture[1] (else capture[0]); mirrored for RTL.
+    sides = [captures[0], captures[1] if len(captures) > 1 else captures[0]]
+    if head["rtl"]:
+        sides.reverse()
+    side_w = min(band_x0, canvas[0] - band_x1)
+    top_limit = settings["device_top"]
+    frame_h = _header_device_height(sides, side_w, canvas[1] - top_limit) if side_w > 0 else None
+    devices = 0
+    if frame_h is not None and frame_h >= canvas[1] * HEADER_MIN_DEVICE:
+        frames = [_device(shot, frame_h, frame_colour, Image, ImageDraw) for shot in sides]
+        top = max(top_limit, round((zy0 + zy1) / 2 - frame_h / 2))
+        positions = [(0, round((band_x0 - frames[0].width) / 2), top),
+                     (1, round(band_x1 + (canvas[0] - band_x1 - frames[1].width) / 2), top)]
+        margin = _shadow_metrics(frame_h)[2]
+        clear = all(x - margin >= 0 and x + frames[i].width + margin <= canvas[0]
+                    and (x + frames[i].width + margin <= zx0 or x - margin >= zx1)
+                    and (x + frames[i].width + margin <= band_x0 or x - margin >= band_x1)
+                    for i, x, _ in positions)
+        if clear:
+            _paste_devices(image, frames, positions, frame_h, Image, ImageDraw, ImageFilter)
+            devices = len(positions)
+
+    text = _headline(cfg, draw, locale, head, settings["type"], (zx0, zy0, zx1, zy1), zx1 - zx0, "centre", "the header zone", text_colour)
+    return image, {**text, "devices": devices}
 
 
 def render_variant(cfg, variant_name, out_dir, locales=None, lint=True, strict_lint=False):
@@ -339,16 +455,21 @@ def render_variant(cfg, variant_name, out_dir, locales=None, lint=True, strict_l
 
     out = Path(out_dir) / variant_name
     out.mkdir(parents=True, exist_ok=True)
+    header_dir = out / creative.HEADER_DIR
+    header = header_settings(cfg)
     root = cfg["_root"] / variant.get("capturesRoot", ".")
-    result = {"written": [], "failed": {}, "report": [], "unlinted": []}
+    result = {"written": [], "header_written": [], "failed": {}, "report": [], "unlinted": []}
     for locale in wanted:
         head = heads[locale]
         path = out / f"{locale}.png"
+        header_path = header_dir / f"{locale}.png"
 
         def fail(reason):
             # Never leave a previous render behind: it would be picked up and uploaded as current.
+            # The locale fails whole, so its header file goes too.
             result["failed"][locale] = reason
             path.unlink(missing_ok=True)
+            header_path.unlink(missing_ok=True)
 
         if lint:
             if not creative.linted(locale):
@@ -367,20 +488,38 @@ def render_variant(cfg, variant_name, out_dir, locales=None, lint=True, strict_l
         except (RenderError, OSError) as error:
             fail(str(error))
             continue
+        header_image, report["header"] = None, None
+        if header:
+            try:
+                header_image, report["header"] = _compose_header(cfg, header, locale, head, captures)
+            except (RenderError, OSError) as error:
+                fail(f"header: {error}")
+                continue
         image.save(path, optimize=True)
         result["written"].append(path)
+        if header_image is not None:
+            header_dir.mkdir(exist_ok=True)
+            header_image.save(header_path, optimize=True)
+            result["header_written"].append(header_path)
+        else:
+            # Header output disabled: a header file from an earlier render would still be placed.
+            header_path.unlink(missing_ok=True)
         result["report"].append(report)
     if result["written"]:
         _contact_sheet(result["written"], Path(out_dir) / "_contact" / f"{variant_name}.png", Image)
+    if result["header_written"]:
+        _contact_sheet(result["header_written"], Path(out_dir) / "_contact" / f"{variant_name}-header.png", Image)
     return result
 
 
 def _contact_sheet(paths, target, Image):
     thumb_w, columns = 1050, 4
-    thumbs = [Image.open(p).convert("RGB").resize((thumb_w, round(thumb_w * 2950 / 5244))) for p in paths]
+    first = Image.open(paths[0])
+    thumb_h = round(thumb_w * first.height / first.width)
+    thumbs = [Image.open(p).convert("RGB").resize((thumb_w, thumb_h)) for p in paths]
     rows = math.ceil(len(thumbs) / columns)
-    sheet = Image.new("RGB", (columns * thumb_w, rows * thumbs[0].height), (255, 255, 255))
+    sheet = Image.new("RGB", (columns * thumb_w, rows * thumb_h), (255, 255, 255))
     for index, thumb in enumerate(thumbs):
-        sheet.paste(thumb, ((index % columns) * thumb_w, (index // columns) * thumb.height))
+        sheet.paste(thumb, ((index % columns) * thumb_w, (index // columns) * thumb_h))
     target.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(target, optimize=True)
