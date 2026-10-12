@@ -6,12 +6,16 @@ App Store creatives, custom product pages and featuring nominations, all built
 on Apple's App Store Asset Library. Every write is a dry run unless `--apply`.
 
 - **`asokit assets render / status / push / submit`** — render the universal
-  5244 × 2950 header and search-results creative from `assets.json` (needs the
-  new `render` extra, Pillow ≥ 10.1), with text and devices kept inside the
-  intersection of Apple's 21:9 and 3:2 crops and a rejection lint on headline
-  copy. A locale that cannot fit or fails the lint fails alone. `push` places
-  the creative on the default page's editable version or on a custom product
-  page; `submit` sends creatives to App Review on their own.
+  5244 × 2950 search-results creative and a dedicated 3840 × 1646 product-page
+  header from `assets.json` (needs the new `render` extra, Pillow ≥ 10.1). The
+  header is its own file because Apple crops it hard and top-anchored: the
+  headline sits in the zone every device shows and the devices at the far
+  edges. A rejection lint runs on headline copy, including third-person health
+  claims (detects, predicts, diagnoses, cures…). A locale that cannot fit,
+  fails the lint, or whose font has no glyph for a character in the headline
+  fails alone — Pillow would otherwise draw a placeholder box and report
+  success. `push` places the creatives on the default page's editable version
+  or on a custom product page; `submit` sends them to App Review on their own.
 - **Asset Library engine** — uploads are reused by content hash, everything in
   scope is uploaded and processed before any surface is touched, group limits
   are checked before writing, and nothing is ever deleted from the library.
@@ -22,15 +26,36 @@ on Apple's App Store Asset Library. Every write is a dry run unless `--apply`.
   protected keywords. Pages are created hidden; promo text and keywords on a
   live page are edited in place, media and deep-link changes open a new
   version; `submit` and `publish` are separate explicit steps, so organic
-  routing never changes implicitly. `--ads-export` writes a page/keyword CSV
-  for Apple Ads ad groups.
+  routing never changes implicitly. Keyword edits on an already-visible page
+  need `--allow-live-routing`; `submit` refuses a new version that would drop
+  live locales or placements, and names what is in a draft submission that
+  holds other items instead of sending them along. `--ads-export` writes a
+  page/keyword CSV for Apple Ads ad groups.
 - **`asokit nominations check / push`** — featuring nominations from
   `nominations.json`, created as drafts; `--submit --name N` submits exactly
   one. Dates need 14 days' notice unless `--force`.
-- **`asokit screenshots push / status --engine library`** (opt-in) — the same
-  screenshot workflow through the Asset Library: diffs instead of rewriting,
-  and mirrors by asset id instead of re-uploading. `--engine sets` stays the
-  default until status parity and one verified full push.
+- **`asokit screenshots push / status`** — replace the screenshot sets of the
+  editable version from `DIR/<locale>/*.png`, with size and count checks before
+  anything is sent, `--mirror` to copy iPad or Watch sets from one locale into
+  the others, and a wait for Apple to finish processing. Subfolders that are
+  not locale codes (`ipad-en-US`, `_contact`) are skipped and named.
+  `--engine library` (opt-in) runs the same workflow through the Asset
+  Library: diffs instead of rewriting, and mirrors by asset id instead of
+  re-uploading. `--engine sets` stays the default until one verified full push.
+- **`asokit metadata diff FILE`** — field by field, what a push of FILE would
+  change in the live listing: short values inline, long ones as changed lines.
+  Read-only. It also names locales that have no support or privacy URL in the
+  file or in App Store Connect, which blocks submission; `metadata check` notes
+  the same from the file alone.
+- **`asokit digest`** — every researched market in one summary: top targetable
+  terms by opportunity, what the app already ranks for, off-category terms.
+- **`metadata suggest --block-file FILE`** — a per-locale blocklist,
+  `{"*": [...], "it": [...], "fr-FR": [...]}`, alongside `--block`. Spanish
+  `del`/`al` and Italian `dell`/`dello`/`delle`/`dei`/`degli` are now filler.
+- **`products apply` sets availability before prices.** App Store Connect
+  rejects a price for a territory the subscription is not sold in, so a
+  brand-new subscription failed on its first price write and never reached
+  the availability step.
 - **Ledger** — every applied write appends a line to `asokit-ledger.jsonl`
   next to `asokit.json`, so App Analytics can be lined up with the date a
   page, keyword or creative actually went live. Dry runs write nothing.

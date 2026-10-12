@@ -188,6 +188,11 @@ aso/de/report.md
 Responses are cached on disk, so re-running the same market weeks later to
 measure whether your changes worked costs almost nothing.
 
+After a multi-market run, `asokit digest` prints every market in one block —
+the top targetable terms by opportunity, what you already rank for, and the
+off-category terms to ignore — which is the view you want open while writing
+metadata for many locales. It reads the `scores.json` files; no network.
+
 ### Competitor analysis
 
 Every report ends with the apps that kept appearing across your queries. A
@@ -364,6 +369,15 @@ It shows its work rather than presenting a field as magic. What it handles:
 brand surfacing in health autocomplete is neither off-category by Apple's
 genre data nor an app name, but it is still not a keyword you want.
 
+When the list differs by market, keep it in a file and pass
+`--block-file blocklist.json`. `"*"` applies everywhere, a language code to
+every locale of that language, a full locale code to that locale only; keys
+starting with `_` are notes:
+
+```json
+{"*": ["balloon"], "it": ["dell"], "fr-FR": ["map"], "_notes": {"map": "fragment of a rival's name"}}
+```
+
 Draft every market at once and validate the result:
 
 ```bash
@@ -404,6 +418,12 @@ asokit metadata pull > baseline.json    # capture the current listing FIRST
 asokit metadata push de.json            # dry run — shows exactly what would change
 asokit metadata push de.json --apply    # write it
 ```
+
+**See the change before you make it.** `asokit metadata diff de.json` reads the
+live listing and prints, field by field, what the push would change — short
+values inline, long ones as changed lines — and names any locale that has no
+support or privacy URL in the file or live, which would block submission. It
+writes nothing.
 
 **Pull before you push.** `metadata pull` emits the same
 `{locale: {field: value}}` shape that `check` and `push` consume, so
@@ -950,9 +970,11 @@ serves a different audience. That's what the competitor table is for — read it
 | `asokit research --market de` | expand and score keywords for one market |
 | `asokit research --all` | run every market in your config |
 | `asokit research --all --resume` | continue an interrupted run, skipping scored markets |
+| `asokit digest` | every researched market in one summary |
 | `asokit metadata suggest --market de` | pack researched candidates into a keyword field |
 | `asokit metadata suggest --all --json` | draft every market's keyword field at once |
 | `asokit metadata pull` | write the live listing to JSON — your rollback baseline |
+| `asokit metadata diff FILE` | field by field, what a push of FILE would change (read-only) |
 | `asokit metadata check FILE` | validate limits, duplication and submission-readiness |
 | `asokit metadata status` | show which version and locales are editable |
 | `asokit metadata push FILE` | dry-run the sync |
@@ -963,6 +985,7 @@ serves a different audience. That's what the competitor table is for — read it
 | `asokit products apply FILE` | dry-run the full provisioning diff |
 | `asokit products apply FILE --apply` | provision groups, subscriptions, prices, availability |
 | `asokit screenshots status` | screenshot sets per locale on the editable version |
+| `asokit screenshots push DIR` | dry-run replacing screenshot sets from `DIR/<locale>/*.png` (`--apply` to write) |
 | `asokit screenshots push DIR --engine library` | dry-run a screenshot replace through the Asset Library |
 | `asokit assets render` | render header/search creatives from `assets.json` |
 | `asokit assets status` | library, asset states, header and search placements |
